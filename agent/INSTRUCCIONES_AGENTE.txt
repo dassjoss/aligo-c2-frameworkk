@@ -1,0 +1,48 @@
+========================================
+  ALIGO C2 - CONFIGURACIÓN DE AGENTE
+========================================
+
+IMPORTANTE: Primero conecta tu computadora al hotspot WiFi de Jose
+
+SERVIDOR: 10.42.0.1:4444 (IP típica de hotspot Linux)
+
+PASOS:
+
+1. Conéctate al punto de acceso WiFi (hotspot) de Jose
+   - Busca la red WiFi que Jose te indicará
+   - Usa la contraseña que te dé
+
+2. Asegúrate de tener Python 3 instalado:
+   python3 --version
+
+3. OPCIÓN A - Usar el archivo pre-configurado:
+   python3 agent_hotspot.py
+
+   OPCIÓN B - Editar agent.py:
+   - Abre agent.py
+   - Busca la línea: SERVER_HOST = "..."
+   - Cámbiala por: SERVER_HOST = "10.42.0.1"
+   - Guarda y ejecuta: python3 agent.py
+
+4. Si el agente se conecta correctamente verás:
+   [*] Intentando conectar a 10.42.0.1:4444
+   [+] Conectado al servidor como agent-XXXXXX
+
+5. El agente se reconectará automáticamente si se pierde la conexión
+
+========================================
+VERIFICAR CONEXIÓN:
+
+Prueba hacer ping al servidor antes de ejecutar el agente:
+   ping 10.42.0.1
+
+Si NO responde, verifica:
+- ¿Estás conectado al hotspot de Jose?
+- ¿La IP del servidor es correcta? (pregúntale a Jose)
+
+========================================
+NOTAS:
+- Si Jose usó otra IP, pregúntale cuál es
+- El agente ejecutará comandos que envíe el operador
+- Puedes cerrar el agente con Ctrl+C
+========================================
