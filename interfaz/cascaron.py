@@ -83,9 +83,39 @@ class C2ServerDashboard:
             return []
     
     def get_agents(self):
-        """Simula agentes (puedes extender para obtenerlos de Redis si los guardas ahí)."""
-        # Por ahora, retorna lista vacía hasta que conectes agentes reales
-        return []
+        """Obtiene agentes conectados desde Redis."""
+        if not redis_client:
+            return []
+        
+        try:
+            keys = redis_client.keys("agent:*:hostname")
+            agents = []
+            
+            for key in keys:
+                agent_id = key.split(":")[1]
+                hostname = redis_client.get(f"agent:{agent_id}:hostname")
+                os_type = redis_client.get(f"agent:{agent_id}:os")
+                ip = redis_client.get(f"agent:{agent_id}:ip")
+                server = redis_client.get(f"agent:{agent_id}:server")
+                last_seen = redis_client.get(f"agent:{agent_id}:last_seen")
+                
+                if hostname:
+                    agents.append({
+                        "id": agent_id,
+                        "hostname": hostname,
+                        "os": os_type or "unknown",
+                        "ip": ip or "unknown",
+                        "server": server or "unknown",
+                        "last_seen": last_seen[:19] if last_seen else "N/A",
+                        "status": "online",
+                        "commands_executed": 0,
+                        "cpu_usage": 0,
+                        "memory_usage": 0,
+                    })
+            
+            return agents
+        except Exception as e:
+            return []
    
     def get_agent_count(self):
         return len([a for a in self.get_agents() if a.get('status') == 'online'])
@@ -361,10 +391,6 @@ with col1:
     
     if agents:
         for agent in agents:
-            status_emoji = "🟢" if agent['status'] == "online" else "🔴"
-            status_class = "agent-online" if agent['status'] == "online" else "agent-offline"
-            last_seen = agent['last_seen'].strftime("%H:%M:%S")
-           
             st.markdown(f"""
             <div class='agent-card'>
                 <div style='display: flex; justify-content: space-between; align-items: start;'>
@@ -373,17 +399,13 @@ with col1:
                         <p style='color: #aaa; margin: 5px 0; font-size: 0.9em;'>
                             {agent['ip']} • {agent['os']}
                         </p>
+                        <p style='color: #666; margin: 2px 0; font-size: 0.8em;'>
+                            Servidor: <span style='color: {ALIGO_RED};'>{agent['server']}</span>
+                        </p>
                     </div>
                     <div style='text-align: right;'>
-                        <p style='margin: 0;'><span class='{status_class}'>{status_emoji} {agent['status'].upper()}</span></p>
-                        <p style='color: #666; font-size: 0.85em; margin: 5px 0 0 0;'>{last_seen}</p>
-                    </div>
-                </div>
-                <div style='margin-top: 10px; padding-top: 10px; border-top: 1px solid {BORDER_GRAY};'>
-                    <div style='display: flex; justify-content: space-between; font-size: 0.85em; color: #aaa;'>
-                        <span>Comandos: <span style='color: {ALIGO_RED};'>{agent['commands_executed']}</span></span>
-                        <span>CPU: <span style='color: {ALIGO_RED};'>{agent['cpu_usage']}%</span></span>
-                        <span>RAM: <span style='color: {ALIGO_RED};'>{agent['memory_usage']}%</span></span>
+                        <p style='margin: 0;'><span class='agent-online'>🟢 ONLINE</span></p>
+                        <p style='color: #666; font-size: 0.85em; margin: 5px 0 0 0;'>{agent['last_seen']}</p>
                     </div>
                 </div>
             </div>

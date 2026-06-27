@@ -144,6 +144,17 @@ def checkin():
         if agent_id not in pending_commands:
             pending_commands[agent_id] = []
     
+    # Registrar agente en Redis
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            redis_client.setex(f"agent:{agent_id}:hostname", 60, hostname)
+            redis_client.setex(f"agent:{agent_id}:os", 60, os_type)
+            redis_client.setex(f"agent:{agent_id}:ip", 60, request.remote_addr)
+            redis_client.setex(f"agent:{agent_id}:server", 60, SERVER_NAME)
+            redis_client.setex(f"agent:{agent_id}:last_seen", 60, datetime.now().isoformat())
+        except Exception:
+            pass
+    
     print(f"\n[+] Agente conectado: {agent_id} desde {request.remote_addr} ({hostname}) 🔒")
     print("> ", end="", flush=True)
     
@@ -164,7 +175,19 @@ def poll():
         if agent_id in agents:
             agents[agent_id]['last_seen'] = datetime.now()
         
-        # Verificar si hay comandos pendientes
+    # Actualizar last_seen en Redis
+    if REDIS_AVAILABLE and redis_client:
+        try:
+            if redis_client.exists(f"agent:{agent_id}:hostname"):
+                redis_client.expire(f"agent:{agent_id}:hostname", 60)
+                redis_client.expire(f"agent:{agent_id}:os", 60)
+                redis_client.expire(f"agent:{agent_id}:ip", 60)
+                redis_client.expire(f"agent:{agent_id}:server", 60)
+                redis_client.setex(f"agent:{agent_id}:last_seen", 60, datetime.now().isoformat())
+        except Exception:
+            pass
+
+    with agents_lock:
         if agent_id in pending_commands and pending_commands[agent_id]:
             cmd = pending_commands[agent_id].pop(0)
             
