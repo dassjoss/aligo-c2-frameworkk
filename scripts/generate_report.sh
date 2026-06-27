@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Navigate to project root (relative to script location)
+cd "$(dirname "$0")/.."
+
 # Script para generar reporte de la migración
 
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -32,20 +35,16 @@ check_file "requirements.txt"
 # Archivos de documentación
 echo ""
 echo "📚 DOCUMENTACIÓN:"
-check_file "START_HERE.md"
-check_file "INDEX.md"
-check_file "RESUMEN_EJECUTIVO.md"
-check_file "MIGRACION_COMPLETA.md"
-check_file "HTTPS_GUIDE.md"
-check_file "README_HTTPS.md"
-check_file "EJEMPLOS_COMANDOS.md"
-check_file "CHANGELOG_HTTPS.md"
+check_file "docs/INDEX.md"
+check_file "docs/RESUMEN_EJECUTIVO.md"
+check_file "docs/CRYPTO_IMPLEMENTATION.md"
+check_file "docs/CRYPTO_QUICKSTART.md"
 
 # Scripts
 echo ""
 echo "🧪 SCRIPTS:"
-check_file "test_https.sh"
-check_file "generate_report.sh"
+check_file "scripts/test_https.sh"
+check_file "scripts/generate_report.sh"
 
 # Verificar sintaxis Python
 echo ""
@@ -105,7 +104,7 @@ if [ -f "agent/agent_ngrok.py" ]; then
 fi
 
 # Contar archivos de documentación
-DOC_COUNT=$(ls -1 *.md 2>/dev/null | wc -l)
+DOC_COUNT=$(find docs -name "*.md" 2>/dev/null | wc -l)
 echo "📚 Archivos de documentación: $DOC_COUNT"
 
 # Resumen final
@@ -130,10 +129,10 @@ echo "1. Instalar dependencias:"
 echo "   pip install -r requirements.txt"
 echo ""
 echo "2. Leer documentación:"
-echo "   cat START_HERE.md"
+echo "   cat docs/CRYPTO_QUICKSTART.md"
 echo ""
 echo "3. Probar funcionamiento:"
-echo "   ./test_https.sh"
+echo "   bash scripts/test_https.sh"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""

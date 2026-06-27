@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Navigate to project root (relative to script location)
+cd "$(dirname "$0")/.."
+
 echo "=========================================="
 echo "  DEMO REALISTA CON NGROK"
 echo "=========================================="

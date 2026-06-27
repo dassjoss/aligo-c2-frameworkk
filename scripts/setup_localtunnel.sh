@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Navigate to project root (relative to script location)
+cd "$(dirname "$0")/.."
+
 echo "=========================================="
 echo "  SETUP LOCALTUNNEL (Alternativa a ngrok)"
 echo "=========================================="
@@ -101,7 +104,7 @@ if ss -tlnp 2>/dev/null | grep -q ":4444"; then
             ssh -R 4444:localhost:4444 serveo.net
         else
             echo ""
-            echo "Para más información, revisa: ALTERNATIVAS_NGROK.md"
+            echo "Para más información, revisa: docs/ALTERNATIVAS_NGROK.md"
         fi
     fi
 else

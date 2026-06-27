@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Navigate to project root (relative to script location)
+cd "$(dirname "$0")/.."
+
 echo "=========================================="
 echo "  TÚNEL TCP con Serveo (Sin instalación)"
 echo "=========================================="

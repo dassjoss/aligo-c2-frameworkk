@@ -260,13 +260,13 @@ aligo-c2-frameworkk/
 
 ### Para empezar:
 - [Resumen ejecutivo](RESUMEN_EJECUTIVO.md)
-- [Guía de uso](HTTPS_GUIDE.md)
-- [Script de prueba](test_https.sh)
+- [Guía de implementación de cifrado](CRYPTO_QUICKSTART.md)
+- [Script de prueba](../scripts/test_https.sh)
 
 ### Para referencia:
 - [Ejemplos de comandos](EJEMPLOS_COMANDOS.md)
-- [Migración completa](MIGRACION_COMPLETA.md)
-- [README técnico](README_HTTPS.md)
+- [Documentación técnica completa](CRYPTO_IMPLEMENTATION.md)
+- [Reporte de auditoría de protocolo](PROTOCOL_AUDIT_REPORT.md)
 
 ### Para código:
 - [Servidor](server/server.py)

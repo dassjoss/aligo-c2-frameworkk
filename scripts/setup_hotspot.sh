@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Navigate to project root (relative to script location)
+cd "$(dirname "$0")/.."
+
 echo "=========================================="
 echo "  Configuración de Hotspot para C2"
 echo "=========================================="
