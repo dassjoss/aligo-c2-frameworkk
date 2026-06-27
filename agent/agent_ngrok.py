@@ -72,6 +72,15 @@ current_server_index = 0
 
 def execute_command(command: str) -> str:
     """Ejecuta un comando del sistema y captura su salida."""
+    
+    # Verificar si es un plugin especial
+    if command.startswith("__plugin__"):
+        plugin_call = command[len("__plugin__"):].strip()
+        parts = plugin_call.split(" ", 1)
+        plugin_name = parts[0]
+        plugin_args = parts[1] if len(parts) > 1 else None
+        return run_plugin(plugin_name, plugin_args)
+    
     try:
         result = subprocess.run(
             command,
@@ -86,6 +95,29 @@ def execute_command(command: str) -> str:
         return "(error) comando excedió el tiempo límite"
     except Exception as e:
         return f"(error) {e}"
+
+
+def run_plugin(plugin_name: str, args=None) -> str:
+    """Carga y ejecuta un plugin desde agent/plugins/."""
+    import importlib
+    import sys as _sys
+    
+    try:
+        # Agregar carpeta plugins al path
+        plugins_dir = os.path.join(os.path.dirname(__file__), 'plugins')
+        if plugins_dir not in _sys.path:
+            _sys.path.insert(0, os.path.dirname(__file__))
+            _sys.path.insert(0, plugins_dir)
+        
+        # Importar módulo del plugin
+        module = importlib.import_module(plugin_name)
+        plugin_instance = module.Plugin()
+        return plugin_instance.run(args)
+    
+    except ModuleNotFoundError:
+        return f"[-] Plugin '{plugin_name}' no encontrado en agent/plugins/"
+    except Exception as e:
+        return f"[-] Error ejecutando plugin '{plugin_name}': {str(e)}"
 
 
 # ============================================
