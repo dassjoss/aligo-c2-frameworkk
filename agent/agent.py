@@ -13,7 +13,7 @@ import platform
 import uuid
 import time
 
-SERVER_HOST = "10.251.176.91"  # localhost para pruebas locales (cambiar a IP real para red)
+SERVER_HOST = ""  # localhost para pruebas locales (cambiar a IP real para red)
 SERVER_PORT = 4444
 AGENT_ID = "agent-" + str(uuid.uuid4())[:6]
 

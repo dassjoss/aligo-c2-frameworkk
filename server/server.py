@@ -10,9 +10,11 @@ import socket
 import threading
 import json
 import uuid
+import os
+import sys
 
 HOST = "0.0.0.0"
-PORT = 4444
+PORT = int(os.getenv("PORT", 4444))  # Puerto configurable vía variable de entorno
 
 # Diccionario de agentes conectados: {agent_id: socket}
 agents = {}
@@ -76,9 +78,10 @@ def handle_agent(conn, addr):
 def operator_console():
     """Consola simple para que el operador mande comandos."""
     print("Consola de operador. Comandos:")
-    print("  list                -> lista agentes conectados")
+    print("  list                  -> lista agentes conectados")
     print("  use <agent_id> <cmd>  -> manda un comando a un agente")
-    print("  exit                -> salir\n")
+    print("  use @agent <cmd>      -> usa el único agente (si solo hay uno)")
+    print("  exit                  -> salir\n")
 
     while True:
         try:
@@ -97,8 +100,25 @@ def operator_console():
             parts = line.split(" ", 2)
             if len(parts) < 3:
                 print("Uso: use <agent_id> <comando>")
+                print("     use @agent <comando>  (usa el único agente si solo hay uno)")
                 continue
             _, agent_id, command = parts
+            
+            # Si usa @agent, auto-selecciona el único agente conectado
+            if agent_id == "@agent":
+                with agents_lock:
+                    if len(agents) == 0:
+                        print("Error: No hay agentes conectados")
+                        continue
+                    elif len(agents) == 1:
+                        agent_id = list(agents.keys())[0]
+                        print(f"[auto-seleccionado] {agent_id}")
+                    else:
+                        print(f"Error: Hay {len(agents)} agentes conectados. Especifica uno:")
+                        for aid in agents:
+                            print(f" - {aid}")
+                        continue
+            
             with agents_lock:
                 conn = agents.get(agent_id)
             if not conn:
