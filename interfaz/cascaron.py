@@ -3,6 +3,15 @@ import pandas as pd
 import time
 from datetime import datetime, timedelta
 import random
+import os
+
+# Importar Redis
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    st.error("⚠️ Redis no disponible. Instala con: pip install redis")
 
 # ==================================================================
 # TEMA ALIGO PROFESIONAL
@@ -14,56 +23,72 @@ ACCENT_GRAY = "#1f1f1f"
 BORDER_GRAY = "#2a2a2a"
 
 # ==================================================================
-# SERVIDOR C2 SIMULADO (CONECTADO A BACKEND REAL)
+# CONEXIÓN A REDIS
+# ==================================================================
+REDIS_HOST = os.getenv("REDIS_HOST", "192.168.1.55")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+
+redis_client = None
+if REDIS_AVAILABLE:
+    try:
+        redis_client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            decode_responses=True,
+            socket_connect_timeout=3
+        )
+        redis_client.ping()
+        st.success(f"✅ Conectado a Redis: {REDIS_HOST}:{REDIS_PORT}")
+    except Exception as e:
+        st.error(f"❌ No se pudo conectar a Redis ({REDIS_HOST}:{REDIS_PORT}): {e}")
+        redis_client = None
+else:
+    st.error("❌ Módulo redis no disponible. Instala con: pip3 install redis")
+
+# ==================================================================
+# SERVIDOR C2 - CONECTADO A REDIS REAL
 # ==================================================================
 class C2ServerDashboard:
     def __init__(self):
-        self.agents = [
-            {
-                "id": "DESKTOP-JOS83",
-                "ip": "10.42.0.5",
-                "os": "Windows 11",
-                "status": "online",
-                "last_seen": datetime.now() - timedelta(seconds=2),
-                "commands_executed": 47,
-                "uptime_hours": 3.5,
-                "cpu_usage": 23,
-                "memory_usage": 58,
-            },
-            {
-                "id": "LINUX-ALX22",
-                "ip": "10.42.0.12",
-                "os": "Ubuntu 22.04",
-                "status": "online",
-                "last_seen": datetime.now() - timedelta(seconds=8),
-                "commands_executed": 92,
-                "uptime_hours": 7.2,
-                "cpu_usage": 15,
-                "memory_usage": 41,
-            },
-            {
-                "id": "PHYSICS-LAB01",
-                "ip": "10.251.176.91",
-                "os": "macOS Ventura",
-                "status": "offline",
-                "last_seen": datetime.now() - timedelta(hours=2),
-                "commands_executed": 34,
-                "uptime_hours": 0,
-                "cpu_usage": 0,
-                "memory_usage": 0,
-            },
-        ]
-        self.command_history = [
-            {"agent": "DESKTOP-JOS83", "cmd": "whoami", "output": "c2_operator", "timestamp": datetime.now() - timedelta(minutes=5)},
-            {"agent": "LINUX-ALX22", "cmd": "sys_info", "output": "OS: Ubuntu 22.04 LTS", "timestamp": datetime.now() - timedelta(minutes=3)},
-            {"agent": "DESKTOP-JOS83", "cmd": "ipconfig", "output": "IPv4 Address: 10.42.0.5", "timestamp": datetime.now() - timedelta(minutes=1)},
-        ]
+        self.command_history = []
    
+    def get_servers_from_redis(self):
+        """Obtiene servidores registrados en Redis."""
+        if not redis_client:
+            st.warning("⚠️ Redis no disponible - No se pueden obtener servidores")
+            return []
+        
+        try:
+            keys = redis_client.keys("server:*:ngrok_url")
+            servers = []
+            
+            st.info(f"🔍 Claves encontradas en Redis: {len(keys)}")
+            
+            for key in keys:
+                server_name = key.split(":")[1]
+                url = redis_client.get(key)
+                timestamp = redis_client.get(f"server:{server_name}:timestamp")
+                
+                if url:
+                    servers.append({
+                        "name": server_name,
+                        "url": url,
+                        "timestamp": timestamp,
+                        "status": "online"
+                    })
+            
+            return servers
+        except Exception as e:
+            st.error(f"❌ Error consultando servidores: {e}")
+            return []
+    
     def get_agents(self):
-        return self.agents
+        """Simula agentes (puedes extender para obtenerlos de Redis si los guardas ahí)."""
+        # Por ahora, retorna lista vacía hasta que conectes agentes reales
+        return []
    
     def get_agent_count(self):
-        return len([a for a in self.agents if a['status'] == 'online'])
+        return len([a for a in self.get_agents() if a.get('status') == 'online'])
    
     def send_command(self, agent_id, command):
         self.command_history.insert(0, {
@@ -261,6 +286,13 @@ with st.sidebar:
    
     st.markdown(f"""
     <div class='metric-card'>
+        <div class='stat-label'>Servidores Online</div>
+        <div class='stat-number'>{len(server.get_servers_from_redis())}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown(f"""
+    <div class='metric-card'>
         <div class='stat-label'>Agentes Online</div>
         <div class='stat-number'>{online_count}/{len(agents)}</div>
     </div>
@@ -292,38 +324,72 @@ with st.sidebar:
 # ==================================================================
 col1, col2 = st.columns([1.2, 2.5], gap="large")
 
-# COLUMNA 1: LISTADO DE AGENTES
+# COLUMNA 1: SERVIDORES Y AGENTES
 with col1:
-    st.markdown(f"<h3 style='color: {ALIGO_RED};'>🖥️ AGENTES REGISTRADOS</h3>", unsafe_allow_html=True)
-   
-    for agent in agents:
-        status_emoji = "🟢" if agent['status'] == "online" else "🔴"
-        status_class = "agent-online" if agent['status'] == "online" else "agent-offline"
-        last_seen = agent['last_seen'].strftime("%H:%M:%S")
-       
-        st.markdown(f"""
-        <div class='agent-card'>
-            <div style='display: flex; justify-content: space-between; align-items: start;'>
-                <div>
-                    <p style='font-weight: 700; margin: 0;'>{agent['id']}</p>
-                    <p style='color: #aaa; margin: 5px 0; font-size: 0.9em;'>
-                        {agent['ip']} • {agent['os']}
-                    </p>
-                </div>
-                <div style='text-align: right;'>
-                    <p style='margin: 0;'><span class='{status_class}'>{status_emoji} {agent['status'].upper()}</span></p>
-                    <p style='color: #666; font-size: 0.85em; margin: 5px 0 0 0;'>{last_seen}</p>
-                </div>
-            </div>
-            <div style='margin-top: 10px; padding-top: 10px; border-top: 1px solid {BORDER_GRAY};'>
-                <div style='display: flex; justify-content: space-between; font-size: 0.85em; color: #aaa;'>
-                    <span>Comandos: <span style='color: {ALIGO_RED};'>{agent['commands_executed']}</span></span>
-                    <span>CPU: <span style='color: {ALIGO_RED};'>{agent['cpu_usage']}%</span></span>
-                    <span>RAM: <span style='color: {ALIGO_RED};'>{agent['memory_usage']}%</span></span>
+    # SERVIDORES REGISTRADOS
+    st.markdown(f"<h3 style='color: {ALIGO_RED};'>🖧 SERVIDORES C2</h3>", unsafe_allow_html=True)
+    
+    servers_list = server.get_servers_from_redis()
+    
+    if servers_list:
+        for srv in servers_list:
+            st.markdown(f"""
+            <div class='agent-card'>
+                <div style='display: flex; justify-content: space-between; align-items: start;'>
+                    <div>
+                        <p style='font-weight: 700; margin: 0;'>🟢 {srv['name']}</p>
+                        <p style='color: #aaa; margin: 5px 0; font-size: 0.85em;'>
+                            {srv['url']}
+                        </p>
+                    </div>
+                    <div style='text-align: right;'>
+                        <p style='margin: 0;'><span class='agent-online'>● ONLINE</span></p>
+                        <p style='color: #666; font-size: 0.75em; margin: 5px 0 0 0;'>{srv['timestamp'][:19] if srv['timestamp'] else 'N/A'}</p>
+                    </div>
                 </div>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
+    else:
+        st.info("⏳ Esperando servidores...")
+    
+    st.markdown("---")
+    
+    # AGENTES CONECTADOS
+    st.markdown(f"<h3 style='color: {ALIGO_RED};'>🖥️ AGENTES CONECTADOS</h3>", unsafe_allow_html=True)
+    
+    agents = server.get_agents()
+    
+    if agents:
+        for agent in agents:
+            status_emoji = "🟢" if agent['status'] == "online" else "🔴"
+            status_class = "agent-online" if agent['status'] == "online" else "agent-offline"
+            last_seen = agent['last_seen'].strftime("%H:%M:%S")
+           
+            st.markdown(f"""
+            <div class='agent-card'>
+                <div style='display: flex; justify-content: space-between; align-items: start;'>
+                    <div>
+                        <p style='font-weight: 700; margin: 0;'>{agent['id']}</p>
+                        <p style='color: #aaa; margin: 5px 0; font-size: 0.9em;'>
+                            {agent['ip']} • {agent['os']}
+                        </p>
+                    </div>
+                    <div style='text-align: right;'>
+                        <p style='margin: 0;'><span class='{status_class}'>{status_emoji} {agent['status'].upper()}</span></p>
+                        <p style='color: #666; font-size: 0.85em; margin: 5px 0 0 0;'>{last_seen}</p>
+                    </div>
+                </div>
+                <div style='margin-top: 10px; padding-top: 10px; border-top: 1px solid {BORDER_GRAY};'>
+                    <div style='display: flex; justify-content: space-between; font-size: 0.85em; color: #aaa;'>
+                        <span>Comandos: <span style='color: {ALIGO_RED};'>{agent['commands_executed']}</span></span>
+                        <span>CPU: <span style='color: {ALIGO_RED};'>{agent['cpu_usage']}%</span></span>
+                        <span>RAM: <span style='color: {ALIGO_RED};'>{agent['memory_usage']}%</span></span>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("⏳ Esperando agentes...")
 
 # COLUMNA 2: CENTRO DE CONTROL
 with col2:
