@@ -575,106 +575,125 @@ with col2:
         # TAB 3: ROTACIÓN DE SERVIDOR
         # =============================================
         with tab3:
-            st.markdown(f"<h4 style='color:{ALIGO_RED};'>🔄 Rotación de Servidor C2</h4>", unsafe_allow_html=True)
-            st.write("Cambia la conexión del agente a otro servidor disponible.")
+            st.markdown(f"<h4 style='color:{ALIGO_RED};'>🔄 Sistema de Alta Disponibilidad</h4>", unsafe_allow_html=True)
             
-            # Ver servidores disponibles
             servers_list = server.get_servers_from_redis()
             agent_server = agent_data.get('server', 'N/A')
             
-            st.markdown(f"**Servidor actual del agente:** `{agent_server}`")
-            
-            if servers_list:
-                other_servers = [s['name'] for s in servers_list if s['name'] != agent_server]
-                
-                if other_servers:
-                    col_srv, col_rotate = st.columns([0.6, 0.4])
-                    with col_srv:
-                        target_srv = st.selectbox(
-                            "Servidor destino:",
-                            other_servers,
-                            label_visibility="collapsed"
-                        )
-                    with col_rotate:
-                        if st.button("🔄 ROTAR AHORA", key="rotate_now", use_container_width=True):
-                            with st.spinner(f"⏳ Rotando agente a {target_srv}..."):
-                                output = server.send_command(
-                                    active_agent,
-                                    f"__plugin__rotate_server {target_srv}"
-                                )
-                            st.code(output, language="bash")
-                            st.success(f"✅ Comando de rotación enviado → {target_srv}")
-                            time.sleep(3)
-                            st.rerun()
-                else:
-                    st.info("ℹ️ Solo hay un servidor disponible. El agente ya está conectado a él.")
+            # --- Estado actual ---
+            col_s1, col_s2, col_s3 = st.columns(3)
+            with col_s1:
+                st.metric("Servidor Activo", agent_server)
+            with col_s2:
+                auto_on = redis_client.get("config:auto_rotation") == "1" if redis_client else False
+                st.metric("Rotación Auto", "✅ ON" if auto_on else "❌ OFF")
+            with col_s3:
+                if redis_client:
+                    next_rot = redis_client.get("c2:next_rotation")
+                    if next_rot and auto_on:
+                        try:
+                            remaining = max(0, float(next_rot) - time.time())
+                            mins = int(remaining // 60)
+                            st.metric("Próxima rotación", f"{mins} min")
+                        except Exception:
+                            st.metric("Próxima rotación", "N/A")
+                    else:
+                        st.metric("Próxima rotación", "---")
             
             st.markdown("---")
             
-            # Rotación automática cada 90 minutos
-            st.markdown(f"<h4 style='color:{ALIGO_RED};'>⏱️ Rotación Automática</h4>", unsafe_allow_html=True)
+            # --- Inicializar sistema ---
+            col_setup, col_status = st.columns([0.5, 0.5])
+            with col_setup:
+                if st.button("⚙️ INICIALIZAR SISTEMA HA", key="ha_setup", use_container_width=True):
+                    with st.spinner("Configurando prioridades en Redis..."):
+                        out = server.send_command(active_agent, "__plugin__rotate_server setup")
+                    st.code(out, language="bash")
+            with col_status:
+                if st.button("📊 VER ESTADO COMPLETO", key="ha_status", use_container_width=True):
+                    with st.spinner("Consultando estado..."):
+                        out = server.send_command(active_agent, "__plugin__rotate_server status")
+                    st.code(out, language="bash")
             
-            # Ver estado de rotación automática en Redis
-            auto_rotation = False
-            rotation_interval = 90
+            st.markdown("---")
             
+            # --- Rotación manual ---
+            st.markdown(f"<p style='color:{ALIGO_RED}; font-weight:bold;'>🔄 Rotación Manual</p>", unsafe_allow_html=True)
+            other_servers = [s['name'] for s in servers_list if s['name'] != agent_server]
+            
+            if other_servers:
+                col_srv, col_rotate, col_failover = st.columns([0.4, 0.3, 0.3])
+                with col_srv:
+                    target_srv = st.selectbox("Servidor destino:", other_servers, label_visibility="collapsed")
+                with col_rotate:
+                    if st.button("🔄 ROTAR", key="rotate_now", use_container_width=True):
+                        with st.spinner(f"Rotando a {target_srv}..."):
+                            out = server.send_command(active_agent, f"__plugin__rotate_server {target_srv}")
+                        st.code(out, language="bash")
+                        time.sleep(3)
+                        st.rerun()
+                with col_failover:
+                    if st.button("⚡ FAILOVER", key="failover_btn", use_container_width=True):
+                        with st.spinner("Ejecutando failover..."):
+                            out = server.send_command(active_agent, "__plugin__rotate_server failover")
+                        st.code(out, language="bash")
+                        time.sleep(3)
+                        st.rerun()
+            else:
+                st.info("ℹ️ Solo un servidor disponible.")
+            
+            st.markdown("---")
+            
+            # --- Rotación automática ---
+            st.markdown(f"<p style='color:{ALIGO_RED}; font-weight:bold;'>⏱️ Rotación Automática (cada N minutos)</p>", unsafe_allow_html=True)
+            
+            interval_val = 90
             if redis_client:
-                auto_val = redis_client.get("config:auto_rotation")
-                auto_rotation = auto_val == "1"
-                interval_val = redis_client.get("config:rotation_interval")
-                if interval_val and interval_val.isdigit():
-                    rotation_interval = int(interval_val)
-                
-                # Ver última rotación
-                last_rotation = redis_client.get("agent:last_rotation")
+                iv = redis_client.get("config:rotation_interval")
+                if iv and iv.isdigit():
+                    interval_val = int(iv)
             
-            col_auto1, col_auto2 = st.columns([0.5, 0.5])
-            with col_auto1:
-                new_interval = st.number_input(
-                    "Intervalo (minutos):",
-                    min_value=5,
-                    max_value=480,
-                    value=rotation_interval,
-                    step=5
-                )
-            with col_auto2:
-                status_label = "🟢 ACTIVA" if auto_rotation else "🔴 INACTIVA"
-                st.markdown(f"<p style='margin-top:30px;'>Estado: <b>{status_label}</b></p>", unsafe_allow_html=True)
-            
-            col_on, col_off = st.columns([0.5, 0.5])
-            with col_on:
-                if st.button("✅ ACTIVAR", key="auto_on", use_container_width=True):
+            col_int, col_on2, col_off2 = st.columns([0.4, 0.3, 0.3])
+            with col_int:
+                new_interval = st.number_input("Intervalo (min):", min_value=5, max_value=480, value=interval_val, step=5)
+            with col_on2:
+                if st.button("✅ ACTIVAR", key="auto_on2", use_container_width=True):
                     if redis_client:
                         redis_client.set("config:auto_rotation", "1")
                         redis_client.set("config:rotation_interval", str(new_interval))
                         redis_client.set("config:rotation_agent", active_agent)
-                        st.success(f"✅ Rotación automática activada: cada {new_interval} min")
-                        st.rerun()
-            with col_off:
-                if st.button("❌ DESACTIVAR", key="auto_off", use_container_width=True):
+                        next_ts = time.time() + (new_interval * 60)
+                        redis_client.set("c2:next_rotation", str(next_ts))
+                    # Notificar al agente
+                    server.send_command(active_agent, "__plugin__rotate_server auto_on")
+                    st.success(f"✅ Activada: cada {new_interval} min")
+                    st.rerun()
+            with col_off2:
+                if st.button("❌ DESACTIVAR", key="auto_off2", use_container_width=True):
                     if redis_client:
                         redis_client.set("config:auto_rotation", "0")
-                        st.warning("⛔ Rotación automática desactivada")
-                        st.rerun()
+                    server.send_command(active_agent, "__plugin__rotate_server auto_off")
+                    st.warning("⛔ Desactivada")
+                    st.rerun()
             
-            # Mostrar última rotación
-            if redis_client and last_rotation:
-                try:
-                    import json as json_lib
-                    rot_data = json_lib.loads(last_rotation)
-                    st.markdown(f"""
-                    <div class='metric-card' style='margin-top:15px;'>
-                        <p style='color:#aaa; font-size:0.85em; margin:0;'>Última rotación:</p>
-                        <p style='margin:5px 0;'>
-                            <span style='color:{ALIGO_RED};'>{rot_data.get('from','?')}</span>
-                            → 
-                            <span style='color:#00ff00;'>{rot_data.get('to','?')}</span>
-                        </p>
-                        <p style='color:#666; font-size:0.8em; margin:0;'>{rot_data.get('timestamp','')}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                except Exception:
-                    pass
+            # --- Historial de failovers ---
+            if redis_client:
+                log_entries = redis_client.lrange("c2:failover_log", 0, 9)
+                if log_entries:
+                    st.markdown("---")
+                    st.markdown(f"<p style='color:{ALIGO_RED}; font-weight:bold;'>📋 Historial de Eventos</p>", unsafe_allow_html=True)
+                    for entry in log_entries:
+                        try:
+                            import json as _json
+                            e = _json.loads(entry)
+                            ts   = e.get('timestamp', '')
+                            typ  = e.get('type', '')
+                            frm  = e.get('from', e.get('failed_server', '?'))
+                            to   = e.get('to', e.get('new_server', '?'))
+                            icon = "⚡" if "failover" in typ else "🔄"
+                            st.markdown(f"`{ts}` {icon} **{typ}**: `{frm}` → `{to}`")
+                        except Exception:
+                            pass
 
         # =============================================
         # TAB 4: HISTORIAL
