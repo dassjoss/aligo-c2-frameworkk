@@ -251,20 +251,20 @@ def poll_command():
     
     if not agent_session_key:
         print("[!] No session key available")
-        return None
+        return "error"  # Error real
     
     try:
         response = requests.post(
             f"{SERVER_URL}/poll",
             json={"agent_id": AGENT_ID},
-            timeout=15  # Aumentado de 10 a 15
+            timeout=15
         )
         response.raise_for_status()
         data = response.json()
         
         encrypted_payload = data.get("payload")
         if not encrypted_payload:
-            return None
+            return None  # Sin payload = sin comandos (respuesta válida)
         
         # Decrypt the payload
         try:
@@ -273,22 +273,22 @@ def poll_command():
             
             # Check if there's an actual command
             if cmd_data.get("command") is not None:
-                return cmd_data
-            return None
+                return cmd_data  # Hay un comando
+            return None  # Sin comandos (respuesta válida)
             
         except Exception as decrypt_error:
             print(f"[!] Error decrypting command: {decrypt_error}")
-            return None
+            return "error"  # Error real
         
     except requests.exceptions.Timeout as e:
-        print(f"[!] Timeout en poll (15s excedidos): {e}")
-        return None
+        print(f"[!] Timeout en poll: {e}")
+        return "error"  # Error real
     except requests.exceptions.ConnectionError as e:
         print(f"[!] Error de conexión en poll: {e}")
-        return None
+        return "error"  # Error real
     except Exception as e:
         print(f"[!] Error en poll: {e}")
-        return None
+        return "error"  # Error real
 
 
 def send_result(msg_id: str, output: str, status: str = "ok"):
@@ -431,7 +431,7 @@ def run_agent():
                 # Preguntar si hay comandos
                 cmd_data = poll_command()
                 
-                if cmd_data and cmd_data.get("type") == "cmd":
+                if cmd_data and cmd_data != "error" and cmd_data.get("type") == "cmd":
                     cmd = cmd_data.get("command")
                     msg_id = cmd_data.get("id")
                     
@@ -447,11 +447,11 @@ def run_agent():
                     else:
                         print(f"[!] Fallo al enviar resultado id={msg_id}")
                         consecutive_failures += 1
-                elif cmd_data is None:
-                    # Error en polling
+                elif cmd_data == "error":
+                    # Error REAL de red/servidor
                     consecutive_failures += 1
                 else:
-                    # No hay comandos, resetear contador
+                    # None = sin comandos pendientes (respuesta válida del servidor)
                     consecutive_failures = 0
                 
                 # Si hay 3 fallos consecutivos, intentar failover
