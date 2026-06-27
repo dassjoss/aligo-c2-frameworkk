@@ -40,3 +40,7 @@ secrets.json
 *.db
 *.sqlite
 *.sqlite3
+
+# Redis snapshots
+dump.rdb
+*.rdb
