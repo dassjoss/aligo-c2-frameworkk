@@ -390,3 +390,5 @@ redis-cli -h 127.0.0.1 -p 6379 KEYS "agent:*"
 ## ⚠️ Aviso Legal
 
 Este software es desarrollado **exclusivamente con fines educativos** dentro de entornos de laboratorio autorizados como parte del Hackathon Aligo Defensores Informáticos 2026. El uso no autorizado para propósitos maliciosos está estrictamente prohibido y es ilegal.
+
+
